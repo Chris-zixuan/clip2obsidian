@@ -1,0 +1,54 @@
+# clip2obsidian 配置模板
+# 复制为 config.toml 后按本机情况修改。config.toml 已在 .gitignore 中，不会入库。
+
+[vault]
+# Obsidian 知识库根目录
+path = "/Users/<you>/Documents/Obsidian/我的知识库"
+# 剪藏落点（相对 vault 根）。协作约定 §3.2 规定 类型: clippings 的落点
+inbox_subdir = "0_Inbox/Clippings"
+# 附件目录（相对 vault 根），协作约定 §5.1
+attachment_subdir = "8_附件"
+
+[fetch]
+# 浏览器 cookie 来源：edge | chrome | safari | firefox | chromium | none
+# 抖音需要登录态 cookie；none 表示不带 cookie（部分内容会抓不到）
+browser = "edge"
+# 单步网络超时（秒）
+timeout_sec = 60
+# 抖音视频下载格式偏好（yt-dlp -f 表达式）
+video_format = "bytevc1_540p_121262-0/best"
+# 是否优先使用平台自带字幕（命中则跳过 ASR，秒出且无同音字错误）
+prefer_subtitle = true
+
+[asr]
+# 转写引擎：faster | mlx | none
+#   faster —— faster-whisper，CPU 可跑，速度一般（现有方案）
+#   mlx    —— mlx-whisper，Apple Silicon 加速，需 pip install mlx-whisper
+#   none   —— 不转写，仅当平台字幕命中时可用
+backend = "faster"
+# 模型规格。faster 用 medium / small / tiny；mlx 用 large-v3 / medium 等
+model = "medium"
+language = "zh"
+# 强制离线，只用已缓存的模型。已缓存时启动更快；
+# 换新模型（如 medium → large-v3）时须临时设为 false，让它先下载
+offline = true
+# 传给引擎的额外参数（可选）
+# initial_prompt = "以下是普通话内容，请使用简体中文转写。"
+
+[xiaohongshu]
+# 必须是移动端 UA —— PC UA 会被登录墙拦，页面里没有笔记数据
+mobile_ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1"
+
+[tools]
+# ffmpeg 可执行文件路径。留空则从 PATH 查找
+ffmpeg = "/opt/homebrew/bin/ffmpeg"
+# 运行子步骤（yt-dlp / 转写）的 Python 解释器。
+# 留空则使用当前解释器；若依赖装在独立 venv 里，必须显式指向它，
+# 否则会报 ModuleNotFoundError: yt_dlp
+python = ""
+
+[publish]
+# 文件名长度上限（字符）
+filename_max_len = 60
+# 知识库落库前是否自动跑断链校验（需 obsidian CLI）
+verify_after_publish = true
