@@ -34,14 +34,16 @@ cd ~/个人项目/clip2obsidian
 python3 clip.py run "<链接>" 2>&1 | tail -20
 ```
 
-转写较慢（61 秒视频约 40 秒），务必用 `run_in_background`。
+转写较慢，耗时基本与时长成正比（实测：61 秒视频约 40 秒；8.5 分钟视频约 5 分 53 秒）。
+必须用 `run_in_background`，不要在前台等。
 
 **失败时**：错误信息已翻译成人话。常见三类——
 
 - `504 / timed out` → 本机代理瞬时抖动。`curl -s -o /dev/null -w "%{http_code}" -I <链接>`
   应返回 302，正常就直接重跑，别改配置。
 - `需要登录态` → 确认 Edge 已登录、`config.toml` 的 `browser = edge`。
-- `未命中平台字幕` → 正常，会走 ASR。
+- `未命中平台字幕` → **绝大多数情况都是这样**（实测抖音/小红书很少提供字幕），
+  走 ASR 是正常路径，不是错误，别为这条去翻配置。
 
 ### 2. 图文类：读图并回填（**关键步骤，不可跳过**）
 
@@ -149,6 +151,20 @@ cd "<vault>" && obsidian unresolved | grep "<笔记名>"    # 空 = 附件嵌入
    `[publish] description_source = "auto"`：清洗平台自带文案（去话题标签、去
    「……版本过低」尾巴），够长就用它，否则才退回转写。
    改口径只改配置，不要改代码。
+9. **平台文案常等于标题** —— 抖音不少作品的 `description` 与 `title` 完全相同
+   （就是标题 + 话题）。去掉话题后往往短于 20 字阈值，`auto` 会退回转写。
+   这是设计行为不是 bug：与标题重复的 15 字，不如转写开头有信息量。
+10. **CAL 插件会接管附件命名** —— 实测移动/重命名笔记时，Obsidian 的附件插件会把
+    `8_附件/{笔记名}/` 下的文件**原地重命名**（时间戳变为操作时刻），并同步改写
+    笔记里的嵌入，断链保持为 0。含义：别指望 `_place_assets` 写下的文件名长期稳定，
+    也别手工去改——插件会自己对齐；要确认只用 `obsidian unresolved` 看有没有断链。
+11. **入库前先查同标题笔记** —— 新笔记落在 `0_Inbox/Clippings/`，若 vault 别处已有
+    同名笔记会造成 wikilink 歧义。先 `obsidian backlinks file="<标题>"` +
+    `obsidian search query="<标题>"` 确认，再把旧笔记**备份出库**
+    （`.workbuddy/backups/`），不要在 vault 里直接删。
+12. **入库后目录要干净** —— v1 定的是平台差异用 `clipping_type` 表达，不再建
+    `0_Inbox/douyin/`、`0_Inbox/xiaohongshu/` 这类平台子目录。发现残留就迁进
+    `Clippings/` 并清空目录。
 
 ---
 

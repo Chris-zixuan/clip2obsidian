@@ -103,6 +103,24 @@ L3（蒸馏）没有对应命令 —— 它由 agent 完成，见 [`skills/clip-
 
 ---
 
+## 测试
+
+回归测试只覆盖**结构性契约**，不碰网络与真实知识库（渲染层全部指向临时目录）：
+
+```bash
+python -m pytest tests -q                       # 推荐
+python -m unittest discover -s tests -t .       # 零依赖跑法，效果相同
+```
+
+| 文件 | 覆盖 |
+|---|---|
+| `test_schema.py` | clip.json 往返序列化、必填字段校验、`ocr_ready` 放行条件、封面/正文图区分 |
+| `test_registry.py` | 真实分享文案抠链接、平台路由、未注册链接报错 |
+| `test_render.py` | YAML frontmatter 完整性（换行/引号/裸值日期）、`description` 三种口径与边界、附件命名与落位、入库三道闸门 |
+| `test_textnorm.py` | 繁转简、半角标点转全角（不误伤 `3.5`/`a:b`）、碎句合段、时间格式 |
+
+---
+
 ## 配置
 
 全部平台假设都在 `config.toml` 里，**代码里没有硬编码**：
@@ -111,7 +129,7 @@ L3（蒸馏）没有对应命令 —— 它由 agent 完成，见 [`skills/clip-
 |---|---|---|
 | `[vault].path` | 知识库根目录 | 必改 |
 | `[fetch].browser` | cookie 来源浏览器 | `edge` / `chrome` / `safari` / `firefox` / `none` |
-| `[fetch].prefer_subtitle` | 字幕优先（命中则跳过 ASR） | 保持 `true` |
+| `[fetch].prefer_subtitle` | 字幕优先（命中则跳过 ASR；实测命中率低，属锦上添花） | 保持 `true` |
 | `[asr].backend` | 转写引擎 | `faster` / `mlx` / `none` |
 | `[tools].python` | 运行子步骤的解释器 | 指向装好依赖的那个 |
 | `[tools].ffmpeg` | ffmpeg 路径 | 留空则从 PATH 找 |
@@ -153,6 +171,7 @@ clip2obsidian/
 ├── asr/                     # 转写引擎（可插拔：faster / mlx / none）
 ├── publish/render.py        # 入库渲染
 ├── skills/clip-to-obsidian/ # 配套的 agent 编排 skill
+├── tests/                   # 回归测试（契约层，不碰网络与真实知识库）
 ├── raw/                     # L1 物料缓存（可随时删）
 └── work/                    # L2/L3 中间产物
 ```
@@ -170,6 +189,16 @@ clip2obsidian/
    用 `set()` 会按字符串排序导致顺序错乱。
 5. **Whisper 转中文长音频，后半程会退化输出繁体**，必须过 `zhconv` 转简体。
 6. **替换同名笔记前会先备份**到 `.workbuddy/backups/`，不做直接删除。
+7. **平台字幕命中率很低** —— 抖音/小红书绝大多数视频不带字幕（实测两条样本的
+   `subtitles` / `automatic_captions` 均为空），ASR 才是主力路径。字幕优先
+   属锦上添花：探测不额外耗时，命中则省掉下载与转写。
+8. **平台文案常等于标题** —— 此时 `description_source = auto` 会退回转写
+   （清掉话题后不足 20 字），这是设计行为。
+9. **CAL 附件插件会接管命名** —— 移动/重命名笔记时，插件会把 `8_附件/{笔记名}/`
+   下的文件原地重命名（时间戳变为操作时刻）并同步改写笔记嵌入。
+   别指望 `_place_assets` 写下的文件名长期稳定，判断一致性只看断链。
+10. **入库前先查同标题笔记**，否则 `Clippings/` 与别处同名会造成 wikilink 歧义；
+    旧笔记应备份出库而不是删除。
 
 ---
 
