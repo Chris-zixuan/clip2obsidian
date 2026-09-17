@@ -52,3 +52,8 @@ python = ""
 filename_max_len = 60
 # 知识库落库前是否自动跑断链校验（需 obsidian CLI）
 verify_after_publish = true
+# frontmatter `description` 取值口径
+#   auto       平台文案够长就用它，否则退回转写（推荐，默认）
+#   platform   只用平台自带文案（语义最贴 importer，但抖音文案常与标题重复）
+#   transcript 只用转写 / 读图文本（信息量最大，但含 ASR 同音字错误）
+description_source = "auto"

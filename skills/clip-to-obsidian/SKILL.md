@@ -144,6 +144,11 @@ cd "<vault>" && obsidian unresolved | grep "<笔记名>"    # 空 = 附件嵌入
    不要在 vault 里直接删。
 6. **`xsec_token` 会过期** → 报错时让用户重新从 App 复制分享链接。
 7. **转写必然有同音字错误** → 笔记里保留 warning callout，不要假装已经校对过。
+8. **`description` 不要用转写原文** —— 转写的同音字错误会直接进 frontmatter 属性面板
+   （实例：「RAW 原片」被转成「REW圆片」、「手选」→「首选」）。默认走
+   `[publish] description_source = "auto"`：清洗平台自带文案（去话题标签、去
+   「……版本过低」尾巴），够长就用它，否则才退回转写。
+   改口径只改配置，不要改代码。
 
 ---
 

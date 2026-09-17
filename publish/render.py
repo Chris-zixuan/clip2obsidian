@@ -146,7 +146,9 @@ def _frontmatter(clip: schema.Clip, title: str, tags: list[str], cfg: config_mod
     author = clip.meta.author or "unknown"
     source = clip.canonical_url or clip.source_url
     clip_type = CLIPPING_TYPES.get(clip.platform, f"{clip.platform}-clip")
-    desc = truncate(_description_source(clip), 120)
+    desc = truncate(
+        _description_source(clip, cfg.publish.description_source), 120
+    )
 
     lines = [
         "---",
@@ -314,19 +316,57 @@ def _verify(cfg: config_mod.Config, note_name: str) -> list[str]:
 
 
 # ------------------------------------------------------------------ 工具
-def _description_source(clip: schema.Clip) -> str:
-    """description 优先用全文开头；没有全文则退回平台简介。
+# 平台文案里的噪声：抖音会在末尾附「……版本过低，升级后可展示全部信息」
+_PLATFORM_JUNK_RE = re.compile(
+    r"(?:…{2,}|\.{3,})[^。！？\n]{0,40}(?:版本过低|升级|下载|客户端|复制打开)[^\n]*$"
+)
+_HASHTAG_RE = re.compile(r"#[^\s#]+")
 
-    两个必须做的处理：
-    1. 折行压平 —— 否则换行符会落进 YAML 双引号串里把 frontmatter 撑破
-    2. 标点归一化 —— clip.json 存的是原始转写（半角标点），直接当描述很难看
+# auto 模式下平台文案的最小可用长度；短于此视为只有话题标签，退回转写
+_AUTO_MIN_PLATFORM_LEN = 20
+
+
+def _clean_platform_text(s: str) -> str:
+    """清洗平台自带文案：去末尾的客户端提示、去话题标签、折行压平。"""
+    s = _PLATFORM_JUNK_RE.sub("", s or "")
+    s = _HASHTAG_RE.sub("", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _description_source(clip: schema.Clip, mode: str = "auto") -> str:
+    """决定 frontmatter `description` 取什么文本。
+
+    语义对齐 importer：importer 写进去的是**来源自身的文案**（如知乎回答的开头、
+    网页的 meta description），不是机器加工过的文本。
+
+    因此默认优先取平台自带文案，而不是 ASR 转写 —— 转写含同音字错误
+    （本次实例里「RAW 原片」被识别成「REW圆片」、「手选」被识别成「首选」），
+    落进属性面板就是脏数据；平台文案是人写的，且天然就是「来源简介」。
+    平台文案为空或只剩话题标签时，才退回转写。
+
+    mode 取值见 core/config.py::PublishConfig.description_source。
     """
     from core.textnorm import normalize
 
-    text = clip.full_text()
-    if not text:
-        text = clip.meta.description
-    return re.sub(r"\s+", " ", normalize(text or "")).strip()[:120]
+    def _flat(s: str) -> str:
+        # 折行必须压平，否则换行符会落进 YAML 双引号串里把 frontmatter 撑破；
+        # 同时做标点归一化（clip.json 存的是原始转写，半角标点很难看）
+        return re.sub(r"\s+", " ", normalize(s or "")).strip()
+
+    platform_text = _flat(_clean_platform_text(clip.meta.description))
+    transcript_text = _flat(clip.full_text())
+
+    if mode == "platform":
+        picked = platform_text or transcript_text
+    elif mode == "transcript":
+        picked = transcript_text or platform_text
+    else:  # auto
+        picked = (
+            platform_text
+            if len(platform_text) >= _AUTO_MIN_PLATFORM_LEN
+            else (transcript_text or platform_text)
+        )
+    return picked
 
 
 def _clean_title(title: str) -> str:

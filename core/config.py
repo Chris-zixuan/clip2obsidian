@@ -112,6 +112,13 @@ class PublishConfig:
     filename_max_len: int = 60
     verify_after_publish: bool = True
 
+    # frontmatter `description` 的取值口径：
+    #   auto       —— 平台自带文案够长就用它，否则退回转写（默认）
+    #   platform   —— 只用平台自带文案
+    #   transcript —— 只用转写 / 读图文本
+    # 默认 auto 的理由见 publish/render.py::_description_source
+    description_source: str = "auto"
+
 
 @dataclass
 class Config:
