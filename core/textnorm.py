@@ -40,9 +40,10 @@ def to_simplified(text: str) -> str:
     """繁体转简体。
 
     Whisper 转长中文音频时，后半程会退化输出繁体，必须过一遍。
+    签名承诺返回 str —— 传 None 时返回空串，不要把 None 漏给下游。
     """
     if not text or not HAS_ZHCONV:
-        return text
+        return text or ""
     return _zh_convert(text, "zh-cn")
 
 

@@ -61,10 +61,14 @@ class Meta:
 
 @dataclass
 class Asset:
-    """下载到本地的媒体文件。"""
+    """下载到本地的媒体文件。
 
-    kind: str                    # 见 ASSET_KINDS
-    path: str                    # 相对项目根，如 raw/douyin_123/01.jpg
+    `kind` / `path` 给默认空串而非设为必填：这样坏数据能读进来、由
+    `validate()` 报成可读问题，而不是在 `from_dict` 阶段抛 TypeError 栈。
+    """
+
+    kind: str = ""               # 见 ASSET_KINDS
+    path: str = ""               # 相对项目根，如 raw/douyin_123/01.jpg
     order: int = 0               # 正文中的排列顺序，从 1 开始；封面为 0
     role: str = "content"        # 见 ASSET_ROLES
 
@@ -167,6 +171,12 @@ class Clip:
         # 嵌套字段单独构造，先从顶层扁平字段里摘出去，否则会重复传参
         nested = ("meta", "assets", "content", "provenance")
         top = {k: v for k, v in _pick(cls, d).items() if k not in nested}
+
+        # 必填字段缺失时补空值，交给 validate() 报出可读问题。
+        # 不补的话这里是 TypeError 栈，而 `clip.py` 只会打出一行晦涩的
+        # "missing required positional argument"，用户看不出是文件坏了。
+        for required in ("id", "platform", "content_type", "source_url"):
+            top.setdefault(required, "")
 
         return cls(
             **top,
