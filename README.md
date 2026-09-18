@@ -52,6 +52,23 @@ python clip.py status                                   # 看处理到哪一步
 
 之后由 agent 读 `work/{id}.md`，用 `skills/clip-to-obsidian` 入库。
 
+## 配套 skill 的安装
+
+`skills/clip-to-obsidian/` 是 L3 的编排说明，但 CodeBuddy 只从固定位置加载 skill，
+所以软链一次即可：
+
+```bash
+mkdir -p ~/.codebuddy/skills
+ln -sfn "$PWD/skills/clip-to-obsidian" ~/.codebuddy/skills/clip-to-obsidian
+```
+
+软链指向仓库，之后改 skill 立刻生效，不用重复安装。装好后在会话里说
+「把这批 md 入库」就会触发。
+
+该 skill 只做一件事：**新增**剪藏（读来源块 → 现场读库内 `9_系统/协作约定.md`
+→ 组属性 → 落 `0_Inbox/Clippings/` → 调用 `yzx-obsidian` 做断链复核）。
+库级的移动、重命名、整理、维护全部转交 `yzx-obsidian`，避免两套规则并行。
+
 ## 转写：本地优先，云端留插槽
 
 ```toml
