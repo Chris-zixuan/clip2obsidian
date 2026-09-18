@@ -31,15 +31,25 @@ class PlatformSpec:
     # 文件名里能抠出原生 id 的正则（如 B站的 BV 号）
     id_pattern: str = ""
 
+    def extract_id(self, text: str) -> str:
+        """从文本里抠原生 id（B站的 BV 号）；没有则返回空串。
+
+        与 `match_local` 分开：平台判定命中「名字特征」就够，但链接与展示
+        需要的是具体 id —— 二者语义不同，混用会导致 BV 号永远抠不出来。
+        """
+        if self.id_pattern:
+            m = re.search(self.id_pattern, text)
+            if m:
+                return m.group(0)
+        return ""
+
     def match_local(self, name: str) -> str | None:
-        """按文件名判定归属，返回抠出的原生 id（可能为 ""）。"""
+        """按文件名判定归属，返回抠出的原生 id（可能为 ""）；不属于本平台返回 None。"""
+        if native := self.extract_id(name):
+            return native
         low = name.lower()
         if any(h.lower() in low for h in self.name_hints):
             return ""
-        if self.id_pattern:
-            m = re.search(self.id_pattern, name)
-            if m:
-                return m.group(0)
         return None
 
 

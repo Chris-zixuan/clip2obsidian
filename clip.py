@@ -130,8 +130,9 @@ def _cmd_ingest(args, cfg, *, also_extract: bool = False) -> int:
                 raw, url=args.url, cfg=cfg, force=args.force
             )
             tag = "命中缓存" if source.get("_cache_hit") else "已导入"
+            native = source.get("native_id") or "无 BV 号"
             print(f"{_LINE}\n[L1] {source['platform']} 导入：{raw}")
-            print(f"[L1] {tag}｜source.json → {source.get('_source_path')}")
+            print(f"[L1] {tag}｜{native}｜source.json → {source.get('_source_path')}")
 
             if also_extract:
                 source_path = Path(source["_source_path"])

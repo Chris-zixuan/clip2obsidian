@@ -60,6 +60,11 @@ python clip.py publish bilibili:BV1xx411c7mD --tags 生活 --title "精简标题
 `description` 默认取平台自带文案而非 ASR 转写 —— 同音字错误会直接进属性面板
 （实测「RAW 原片」→「REW圆片」）。口径由 `[publish].description_source` 控制。
 
+7. **clip id 取自文件内容指纹**（大小 + 头尾各 1 MB），不依赖文件名与路径：
+   改名、移动目录都还是同一条，不会重复落库。BV 号单独存 `native_id`，
+   只用于拼链接与展示 —— 拿它当 id 的话，用户一删文件名里的 BV 后缀，
+   同一个视频就又变成新条目了。
+
 ## 目录结构
 
 ```
@@ -99,7 +104,7 @@ python -m pytest --basetemp=/tmp/c2o_pytest
 
 ## 待办（重建计划）
 
-- [ ] `detect_local` 已数据驱动，但平台 id 仍依赖文件名（改名即视为新条目）
+- [x] 平台 id 改为文件内容指纹，改名 / 移动不再重复落库
 - [ ] L3 缺少机器校验：digest 结构不合规没有检查点
 - [ ] 多平台（抖音 / 小红书图文）按上述 SOP 长回来
 - [ ] 图文形态（`image_text`）与附件落位在精简时移除，需重新设计

@@ -66,7 +66,7 @@ def ingest(path, *, url=None, cfg=None, force=False) -> dict:
     if not p.exists() or not p.is_file():
         raise IngestError(f"找不到视频文件：{p}")
 
-    pid = _platform_id(spec, p)
+    pid = _stable_id(p)
     clip_id = f"{spec.name}:{pid}"
     outdir = paths.raw_dir(clip_id)
     source_path = outdir / "source.json"
@@ -94,10 +94,15 @@ def ingest(path, *, url=None, cfg=None, force=False) -> dict:
     # 3) 文件名解析标题
     filename_title = _title_from_filename(p.stem)
 
-    source_url = url or link or _synth_url(pid)
+    # 原生 id（B站的 BV 号）只用于拼链接与展示，不参与 clip id ——
+    # 否则用户把文件名里的 BV 后缀删掉，同一个视频就会被当成新条目。
+    native_id = _native_id(spec, p, info_json, url)
+
+    source_url = url or link or _synth_url(native_id)
     source = {
         "platform": spec.name,
         "platform_id": pid,
+        "native_id": native_id,
         "source_url": source_url,
         "canonical_url": source_url,
         "fetched_at": common.now_iso(),
@@ -129,13 +134,56 @@ def scan(inbox_dir) -> list[tuple[Path, "registry.PlatformSpec | None", str]]:
     return out
 
 
-# ------------------------------------------------------------------ 元信息推导
-def _platform_id(spec: registry.PlatformSpec, p: Path) -> str:
-    """原生 id：能抠出 BV 号就用它（稳定可追溯），否则 hash 文件名主干。"""
-    found = spec.match_local(p.name)
-    if found:
-        return found
-    return _sha1(p.stem)
+# ------------------------------------------------------------------ id 推导
+# 指纹取样大小：头尾各 1 MB。足够区分不同视频，又不必读整个大文件。
+_FP_CHUNK = 1 << 20
+
+
+def _stable_id(p: Path) -> str:
+    """clip id —— 只依赖文件内容，不依赖文件名与路径。
+
+    曾按文件名 hash，结果是「视频改名 = 全新条目 = 重复落库」。改名为
+    `xxx.mp4` → `未命名.mp4` 就要重跑整条流水线，还得手动去重。
+    """
+    try:
+        return _content_fingerprint(p)
+    except OSError:
+        # 读不到内容（权限、异常文件）时退回文件名 —— 不稳定，但至少能跑下去
+        return _sha1(p.stem)
+
+
+def _content_fingerprint(p: Path) -> str:
+    """内容指纹 = sha1(文件大小 + 头 1MB + 尾 1MB)。
+
+    为什么不直接 hash 整个文件：一个 2 GB 的视频全量哈希要十几秒，而 L1 常常
+    一次扫整个收件目录。头尾采样对区分「不同视频」已经足够（封装容器的头部
+    元数据本就不同），且恒定耗时。
+    """
+    size = p.stat().st_size
+    h = hashlib.sha1(str(size).encode("ascii"))
+    with p.open("rb") as f:
+        h.update(f.read(_FP_CHUNK))
+        if size > _FP_CHUNK:
+            f.seek(-_FP_CHUNK, 2)
+            h.update(f.read(_FP_CHUNK))
+    return h.hexdigest()[:12]
+
+
+def _native_id(
+    spec: registry.PlatformSpec, p: Path, info_json: dict | None = None, url: str | None = None
+) -> str:
+    """原生 id（B站的 BV 号），拿不到返回空串。
+
+    来源优先级：文件名 → 命令行给的 --url → sidecar 的 info.json。
+    只用于拼规范链接与展示，**不参与 clip id**。
+    """
+    for src in (p.name, url or ""):
+        if found := spec.extract_id(src):
+            return found
+    v = (info_json or {}).get("id")
+    if isinstance(v, str) and v.upper().startswith("BV"):
+        return v
+    return ""
 
 
 def _title_from_filename(stem: str) -> str:
@@ -146,18 +194,15 @@ def _title_from_filename(stem: str) -> str:
     return s.strip()
 
 
-def _synth_url(pid: str) -> str:
-    """能拼出规范链接就拼（便于笔记里放来源），拼不出则留空。"""
-    if pid.upper().startswith("BV"):
-        return f"https://www.bilibili.com/video/{pid}"
+def _synth_url(native_id: str) -> str:
+    """有原生 id 就拼出规范链接（便于笔记里放来源），拼不出则留空。"""
+    if native_id.upper().startswith("BV"):
+        return f"https://www.bilibili.com/video/{native_id}"
     return ""
 
 
 def _sha1(text: str) -> str:
-    """稳定、幂等的 12 位短 id——保证重复 ingest 命中同一 id。
-
-    注意：文件名改名会得到新 id、被当成全新条目，重跑请用 --force 而非改名。
-    """
+    """12 位短哈希。只在读不到文件内容时兜底用。"""
     return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
 
 
