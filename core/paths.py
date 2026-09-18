@@ -19,6 +19,8 @@ RAW_DIR = PROJECT_ROOT / "raw"          # L1 原始物料缓存
 WORK_DIR = PROJECT_ROOT / "work"        # L2/L3 中间产物
 SKILLS_DIR = PROJECT_ROOT / "skills"
 CONFIG_PATH = PROJECT_ROOT / "config.toml"
+# 同名笔记替换前的备份落点。使用者的真实备份区，测试必须重定向（见 tests/conftest.py）。
+BACKUP_DIR = PROJECT_ROOT / ".workbuddy" / "backups"
 
 # ---------------------------------------------------------------- 运行平台
 IS_WINDOWS = sys.platform == "win32"
@@ -76,20 +78,20 @@ def ensure_dirs() -> None:
 
 
 def raw_dir(clip_id: str) -> Path:
-    """单个 clip 的原始物料目录，如 raw/douyin_7686034803698754161/。"""
+    """单个 clip 的原始物料目录，如 raw/bilibili_BV1xx411c7mD/。"""
     d = RAW_DIR / _dir_name(clip_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
 
 
 def work_path(clip_id: str, suffix: str) -> Path:
-    """单个 clip 的中间产物路径，如 work/douyin_7686034803698754161.clip.json。"""
+    """单个 clip 的中间产物路径，如 work/bilibili_BV1xx411c7mD.clip.json。"""
     WORK_DIR.mkdir(parents=True, exist_ok=True)
     return WORK_DIR / f"{_dir_name(clip_id)}{suffix}"
 
 
 def _dir_name(clip_id: str) -> str:
-    """把 clip_id（douyin:123）转成适合做目录名的形式（douyin_123）。"""
+    """把 clip_id（bilibili:BV1xx）转成适合做目录名的形式（bilibili_BV1xx）。"""
     return clip_id.replace(":", "_")
 
 

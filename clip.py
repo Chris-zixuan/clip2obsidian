@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
-"""clip2obsidian · 链接 → Obsidian 笔记
+"""clip2obsidian · 本地文件 → Obsidian 笔记
 
 四层流水线，每层产物落盘、可单独检查、可单独重跑：
 
-  L1  fetch    链接          → raw/{id}/source.json + 媒体物料
-  L2  extract  source        → work/{id}.clip.json      （统一契约）
-  L3  distill  clip.json     → work/{id}.digest.md      （由 agent 完成）
-  L4  publish  clip + digest → vault 笔记 + 附件
+  L1  ingest   本地文件      → raw/{id}/source.json（大媒体不复制，记绝对路径）
+  L2  extract  source        → work/{id}.clip.json（统一契约）
+  L3  distill  clip.json     → work/{id}.digest.md（由 agent 完成）
+  L4  publish  clip + digest → vault 笔记
+
+代码不抓链接、不下载——用户把文件下到本地后直接 ingest。
 
 常用：
-  python clip.py "https://v.douyin.com/xxxxxx/"                 # L1 + L2
-  python clip.py publish douyin:123 --tags 生活 \\
-      --digest work/douyin_123.digest.md --title "精简标题"
-  python clip.py doctor                                         # 环境自检
+  python clip.py ingest "~/Downloads/xxx_哔哩哔哩_bilibili.mp4"   # L1
+  python clip.py extract bilibili:BV1xxxx                        # L2
+  python clip.py publish bilibili:BV1xxxx --tags 工业 \\
+      --title "认识 MAF" --digest work/bilibili_BV1xxxx.digest.md
+  python clip.py scan                                            # 看收件目录
+  python clip.py doctor                                          # 环境自检
 """
 
 from __future__ import annotations
@@ -29,8 +33,12 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from core import config as config_mod  # noqa: E402
 from core import paths, registry, schema  # noqa: E402
+from pipelines.common import ExtractError  # noqa: E402
+from pipelines.local.ingest import IngestError  # noqa: E402
+from publish.render import PublishError  # noqa: E402
+from asr.base import AsrError  # noqa: E402
 
-COMMANDS = ("run", "fetch", "extract", "publish", "status", "doctor")
+COMMANDS = ("run", "ingest", "extract", "publish", "status", "doctor", "scan")
 
 _LINE = "─" * 62
 
@@ -38,35 +46,41 @@ _LINE = "─" * 62
 # ------------------------------------------------------------------ 入口
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # 裸链接或空参数一律当作 run，省去记子命令
-    if not argv or argv[0] not in COMMANDS:
+    # 裸参数（路径）一律当作 run（= ingest + extract），省去记子命令。
+    # 但 -h / --help 必须放行给顶层 parser：否则只会显示 run 的参数帮助，
+    # 使用者连有哪些子命令都看不到 —— 帮助的可发现性优先于省字。
+    wants_top_help = argv[:1] in (["-h"], ["--help"])
+    if not wants_top_help and (not argv or argv[0] not in COMMANDS):
         argv = ["run", *argv]
 
     ap = argparse.ArgumentParser(
-        prog="clip", description="clip2obsidian · 链接 → Obsidian 笔记"
+        prog="clip", description="clip2obsidian · 本地文件 → Obsidian 笔记"
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    p_run = sub.add_parser("run", help="L1+L2：抓取并提取出 clip.json")
-    p_run.add_argument("links", nargs="+", help="链接或含链接的分享文案")
-    p_run.add_argument("--force", action="store_true", help="忽略缓存重新抓取")
+    p_run = sub.add_parser("run", help="L1+L2：导入本地文件并提取 clip.json")
+    p_run.add_argument("paths", nargs="*", help="视频文件；省略则扫收件目录")
+    p_run.add_argument("--url", default=None, help="可选链接，仅用于元信息增强（不下载）")
+    p_run.add_argument("--force", action="store_true", help="忽略缓存重新导入")
 
-    p_fetch = sub.add_parser("fetch", help="L1：只抓原始物料")
-    p_fetch.add_argument("links", nargs="+")
-    p_fetch.add_argument("--force", action="store_true")
+    p_ingest = sub.add_parser("ingest", help="L1：本地文件 → source.json")
+    p_ingest.add_argument("paths", nargs="*", help="视频文件；省略则扫收件目录")
+    p_ingest.add_argument("--url", default=None, help="可选链接，仅用于元信息增强（不下载）")
+    p_ingest.add_argument("--force", action="store_true", help="忽略缓存重新导入")
 
-    p_ext = sub.add_parser("extract", help="L2：物料 → clip.json")
-    p_ext.add_argument("targets", nargs="+", help="clip id（douyin:123）或 source.json 路径")
+    p_ext = sub.add_parser("extract", help="L2：source.json → clip.json")
+    p_ext.add_argument("targets", nargs="+", help="clip id（bilibili:BV1xx）或 source.json 路径")
     p_ext.add_argument("--force", action="store_true")
 
     p_pub = sub.add_parser("publish", help="L4：clip.json → vault 笔记")
-    p_pub.add_argument("target", help="clip id（douyin:123）或 clip.json 路径")
+    p_pub.add_argument("target", help="clip id（bilibili:BV1xx）或 clip.json 路径")
     p_pub.add_argument("--tags", required=True, help="受控词表标签，逗号分隔")
-    p_pub.add_argument("--digest", type=Path, help="摘要 markdown 路径（默认自动找 work/{id}.digest.md）")
+    p_pub.add_argument("--digest", type=Path, help="摘要 markdown 路径（默认 work/{id}.digest.md）")
     p_pub.add_argument("--title", default="", help="覆写标题（同时决定文件名）")
     p_pub.add_argument("--dry-run", action="store_true", help="只显示将要做什么，不落盘")
 
     sub.add_parser("status", help="列出已产出的 clip")
+    sub.add_parser("scan", help="列出收件目录里可处理的内容（不落盘）")
     sub.add_parser("doctor", help="环境自检")
 
     args = ap.parse_args(argv)
@@ -79,40 +93,65 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "run": _cmd_run,
-        "fetch": _cmd_fetch,
+        "ingest": _cmd_ingest,
         "extract": _cmd_extract,
         "publish": _cmd_publish,
         "status": _cmd_status,
         "doctor": _cmd_doctor,
+        "scan": _cmd_scan,
     }
     try:
         return handlers[args.cmd](args, cfg)
     except (
         config_mod.ConfigError,
-        registry.UnsupportedLink,
+        registry.UnsupportedPlatform,
+        IngestError,
+        ExtractError,
+        PublishError,
+        AsrError,
     ) as e:
         print(f"[错误] {e}", file=sys.stderr)
         return 1
-    except Exception as e:  # 各层自定义错误统一在此收敛
-        if type(e).__name__ in ("FetchError", "ExtractError", "PublishError", "AsrError"):
+
+
+# ------------------------------------------------------------------ L1
+def _cmd_ingest(args, cfg, *, also_extract: bool = False) -> int:
+    """本地文件 → source.json（L1）。also_extract=True 时继续跑 L2。"""
+    from pipelines.local import ingest as local_ingest
+
+    targets = _collect_paths(args, cfg)
+    if not targets:
+        return 0
+
+    rc = 0
+    for raw in targets:
+        try:
+            source = local_ingest.ingest(
+                raw, url=args.url, cfg=cfg, force=args.force
+            )
+            tag = "命中缓存" if source.get("_cache_hit") else "已导入"
+            print(f"{_LINE}\n[L1] {source['platform']} 导入：{raw}")
+            print(f"[L1] {tag}｜source.json → {source.get('_source_path')}")
+
+            if also_extract:
+                source_path = Path(source["_source_path"])
+                spec = registry.get(source["platform"])
+                ext_mod = _platform_module(spec, "extract")
+                print("[L2] 提取中…")
+                try:
+                    clip = ext_mod.extract(source_path, cfg=cfg, force=args.force)
+                    _print_clip_summary(clip)
+                except (ExtractError, AsrError) as e:
+                    # L2 跑不通（如 ASR 未就绪）可接受：L1 已落盘，稍后单独 extract
+                    print(
+                        f"[警告] L2 提取未跑通（可稍后单独跑 extract）：{e}",
+                        file=sys.stderr,
+                    )
+        except (IngestError, ExtractError, AsrError) as e:
             print(f"[错误] {e}", file=sys.stderr)
-            return 1
-        raise
-
-
-# ------------------------------------------------------------------ L1 + L2
-def _cmd_fetch(args, cfg) -> int:
-    for raw in args.links:
-        url = registry.extract_url(raw)
-        spec = registry.detect(url)
-        module = _platform_module(spec, "fetch")
-        print(f"{_LINE}\n[L1] {spec.label} 采集：{url}")
-        source = module.fetch(url, cfg=cfg, force=args.force)
-        tag = "命中缓存" if source.get("_cache_hit") else "已抓取"
-        kind = "字幕" if source.get("subtitle") else ("视频" if source.get("media") else "无媒体")
-        print(f"[L1] {tag}｜物料：{kind}")
-        print(f"     {source.get('_source_path')}")
-    return 0
+            rc = 1
+            continue
+    return rc
 
 
 def _cmd_extract(args, cfg) -> int:
@@ -128,29 +167,8 @@ def _cmd_extract(args, cfg) -> int:
 
 
 def _cmd_run(args, cfg) -> int:
-    rc = 0
-    for raw in args.links:
-        try:
-            url = registry.extract_url(raw)
-            spec = registry.detect(url)
-            print(f"{_LINE}\n[L1] {spec.label} 采集：{url}")
-            fetch_mod = _platform_module(spec, "fetch")
-            source = fetch_mod.fetch(url, cfg=cfg, force=args.force)
-            tag = "命中缓存" if source.get("_cache_hit") else "已抓取"
-            kind = "字幕" if source.get("subtitle") else ("视频" if source.get("media") else "无媒体")
-            print(f"[L1] {tag}｜物料：{kind}")
-
-            print(f"[L2] 提取中…")
-            extract_mod = _platform_module(spec, "extract")
-            clip = extract_mod.extract(Path(source["_source_path"]), cfg=cfg, force=args.force)
-            _print_clip_summary(clip)
-        except Exception as e:
-            if type(e).__name__ in ("FetchError", "ExtractError", "AsrError"):
-                print(f"[错误] {e}", file=sys.stderr)
-                rc = 1
-                continue
-            raise
-    return rc
+    """裸参数 / run：导入本地文件并尽量提取出 clip.json。"""
+    return _cmd_ingest(args, cfg, also_extract=True)
 
 
 # ------------------------------------------------------------------ L4
@@ -181,8 +199,6 @@ def _cmd_publish(args, cfg) -> int:
     )
 
     print(f"[L4] 笔记：{result.path}")
-    if result.assets:
-        print(f"[L4] 附件 {len(result.assets)} 个 → {result.assets[0].parent}")
     for w in result.warnings:
         print(f"[!] {w}")
     if not args.dry_run:
@@ -194,7 +210,7 @@ def _cmd_publish(args, cfg) -> int:
 def _cmd_status(args, cfg) -> int:
     files = sorted(paths.WORK_DIR.glob("*.clip.json"))
     if not files:
-        print("还没有任何 clip。先跑：python clip.py <链接>")
+        print("还没有任何 clip。先跑：python clip.py ingest <本地文件路径>")
         return 0
     print(f"{_LINE}\n{'clip id':<34}{'形态':<11}{'摘要':<6}标题")
     print(_LINE)
@@ -220,44 +236,31 @@ def _cmd_doctor(args, cfg) -> int:
         print(f"  {k:<16}{v}")
 
     print(_LINE)
-    checks: list[tuple[str, bool, str]] = []
-
-    vault = cfg.vault.root
-    checks.append(("知识库目录存在", vault.exists(), str(vault)))
-
-    inbox = cfg.vault.inbox
-    checks.append(("剪藏落点存在", inbox.exists(), str(inbox)))
-
-    ffmpeg = cfg.tools.ffmpeg_bin
-    checks.append(("ffmpeg 可用", bool(ffmpeg), ffmpeg or "未找到，brew install ffmpeg"))
+    checks: list[tuple[str, bool, str]] = [
+        ("知识库目录存在", cfg.vault.root.exists(), str(cfg.vault.root)),
+        ("剪藏落点存在", cfg.vault.inbox.exists(), str(cfg.vault.inbox)),
+        ("ffmpeg 可用", bool(cfg.tools.ffmpeg_bin),
+         cfg.tools.ffmpeg_bin or "未找到，brew install ffmpeg"),
+        ("Python 解释器", Path(cfg.tools.python_bin).exists(), cfg.tools.python_bin),
+        ("项目目录可写", _writable(paths.WORK_DIR), str(paths.WORK_DIR)),
+    ]
 
     py = cfg.tools.python_bin
-    checks.append(("Python 解释器", Path(py).exists(), py))
-
-    ytdlp = _probe([py, "-m", "yt_dlp", "--version"])
-    checks.append(("yt-dlp 可用", bool(ytdlp), ytdlp or f"{py} -m yt_dlp 不可用"))
-
-    if cfg.asr.backend == "faster":
-        mod, label = "faster_whisper", "faster-whisper"
-    elif cfg.asr.backend == "mlx":
-        mod, label = "mlx_whisper", "mlx-whisper"
-    else:
-        mod, label = None, cfg.asr.backend
-    if mod:
-        probe = _probe([py, "-c", f"import {mod}; print('已安装')"])
-        checks.append((f"{label} 可用", bool(probe), probe or f"{py} 里没有 {label}"))
+    probe = _probe([py, "-c", "import faster_whisper; print('已安装')"])
+    checks.append(("faster-whisper 可用", bool(probe), probe or f"{py} 里没有 faster-whisper"))
 
     zh = _probe([py, "-c", "import zhconv; print('已安装')"])
-    checks.append(
-        ("zhconv 可用（繁转简）", bool(zh), zh or f"{py} 里没有 zhconv，繁转简会被跳过")
-    )
-    checks.append(("项目目录可写", _writable(paths.WORK_DIR), str(paths.WORK_DIR)))
+    checks.append(("zhconv 可用（繁转简）", bool(zh), zh or f"{py} 里没有 zhconv"))
 
     for name, passed, detail in checks:
-        mark = "✓" if passed else "✗"
+        print(f"  {'✓' if passed else '✗'} {name:<26}{detail if not passed else ''}")
         if not passed:
             ok = False
-        print(f"  {mark} {name:<26}{detail if not passed else ''}")
+
+    # yt-dlp 仅用于 --url 元信息增强，不计入成败
+    ytdlp = _probe([py, "-m", "yt_dlp", "--version"])
+    print(f"  {'✓' if ytdlp else '·'} yt-dlp 可用（仅 --url 增强需要）"
+          f"{('：' + ytdlp) if ytdlp else '：未安装也不影响本地导入'}")
 
     print(_LINE)
     print("平台注册：" + "、".join(f"{p.name}({p.label})" for p in registry.PLATFORMS))
@@ -265,14 +268,65 @@ def _cmd_doctor(args, cfg) -> int:
     return 0 if ok else 1
 
 
+def _cmd_scan(args, cfg) -> int:
+    """列出收件目录里可识别的待处理项（不落盘）。"""
+    from pipelines.local import ingest as local_ingest
+
+    items = local_ingest.scan(cfg.ingest.inbox)
+    if not items:
+        print(f"收件目录 {cfg.ingest.inbox} 为空或不存在，没有可处理的内容。")
+        print(f"  可在 config.toml 的 [ingest].inbox_dir 配置，或显式传路径给 ingest。")
+        return 0
+    print(f"{_LINE}\n收件目录：{cfg.ingest.inbox}")
+    print(_LINE)
+    for path, spec, note in items:
+        print(f"  {note:<12} {path.name}")
+    print(_LINE)
+    print("用 clip.py ingest <路径> 导入，或直接 clip.py <路径> 一步到位（L1+L2）。")
+    return 0
+
+
 # ------------------------------------------------------------------ 工具
+def _collect_paths(args, cfg) -> list[str]:
+    """决定这一轮处理哪些路径。
+
+    命令行显式给了路径就用它；省略则扫「收件目录」。
+    识别不出平台的内容不静默丢弃，而是明确报出来：本地文件名千奇百怪，
+    让使用者知道「这一项我没认出来」远比悄悄跳过有用。
+    """
+    if args.paths:
+        return list(args.paths)
+
+    from pipelines.local import ingest as local_ingest
+
+    print(f"{_LINE}\n未指定文件，改扫收件目录：{cfg.ingest.inbox}")
+    items = local_ingest.scan(cfg.ingest.inbox)
+
+    known = [p for p, spec, _ in items if spec]
+    unknown = [p for p, spec, _ in items if not spec]
+    if unknown:
+        print(f"[提示] {len(unknown)} 项识别不出平台，已跳过：")
+        for p in unknown[:5]:
+            print(f"       {p.name}")
+        if len(unknown) > 5:
+            print(f"       …另有 {len(unknown) - 5} 项")
+
+    if not known:
+        print("[提示] 收件目录里没有可处理的内容。")
+        print(f"       把下载好的文件放进 {cfg.ingest.inbox}，或直接给路径：clip.py ingest <路径>")
+        print("       先看看目录里有什么：clip.py scan")
+        return []
+
+    print(f"[L1] 收件目录命中 {len(known)} 项")
+    return [str(p) for p in known]
+
+
 def _platform_module(spec: registry.PlatformSpec, layer: str):
     try:
         return importlib.import_module(f"pipelines.{spec.module}.{layer}")
     except ImportError as e:
-        raise registry.UnsupportedLink(
-            f"平台 {spec.name} 的 {layer} 层还没实现：{e}\n"
-            f"  （v1 只承诺抖音与小红书，见架构设计 §8）"
+        raise registry.UnsupportedPlatform(
+            f"平台 {spec.name} 的 {layer} 层还没实现：{e}"
         ) from e
 
 
@@ -283,7 +337,7 @@ def _resolve_source(target: str) -> Path:
     else:
         p = Path(target).expanduser()
     if not p.exists():
-        raise SystemExit(f"[错误] 找不到采集结果：{p}\n  先跑 L1：python clip.py fetch <链接>")
+        raise SystemExit(f"[错误] 找不到采集结果：{p}\n  先跑 L1：python clip.py ingest <路径>")
     return p
 
 
@@ -293,7 +347,7 @@ def _resolve_clip(target: str) -> Path:
     else:
         p = Path(target).expanduser()
     if not p.exists():
-        raise SystemExit(f"[错误] 找不到 clip：{p}\n  先跑 L1+L2：python clip.py <链接>")
+        raise SystemExit(f"[错误] 找不到 clip：{p}\n  先跑 L1+L2：python clip.py <路径>")
     return p
 
 
@@ -302,7 +356,7 @@ def _platform_from_path(p: Path) -> str:
     return name.split("_", 1)[0] if "_" in name else name
 
 
-def _read_json(p: Path) -> dict:
+def _read_json(p: Path) -> dict[str, object]:
     import json
 
     return json.loads(p.read_text(encoding="utf-8"))
@@ -310,16 +364,10 @@ def _read_json(p: Path) -> dict:
 
 def _print_clip_summary(clip: schema.Clip) -> None:
     text = clip.full_text()
-    print(
-        f"[L2] 完成｜{clip.content_type}｜{len(text)} 字｜"
-        f"转写 {len(clip.content.transcript)} 段｜图 {len([a for a in clip.content_assets if a.kind == 'image'])} 张"
-    )
+    print(f"[L2] 完成｜{clip.content_type}｜{len(text)} 字｜转写 {len(clip.content.transcript)} 段")
     print(f"     extractor: {clip.provenance.extractor}")
     print(f"     clip.json: {paths.work_path(clip.id, '.clip.json')}")
-    if not clip.ocr_ready():
-        print(f"[→] 下一步（L3）：读图并回填 images_ocr，然后写摘要")
-    else:
-        print(f"[→] 下一步（L3）：写摘要 → work/{clip.id.replace(':', '_')}.digest.md")
+    print(f"[→] 下一步（L3）：写摘要 → work/{clip.id.replace(':', '_')}.digest.md")
     print(f"[→] 最后（L4）：python clip.py publish {clip.id} --tags <标签>")
 
 

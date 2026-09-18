@@ -2,9 +2,9 @@
 
 为什么要有这个入口
 ------------------
-依赖（faster-whisper / mlx-whisper）装在独立 venv 里，而主程序可能由别的
-解释器启动。统一以子进程 + `[tools].python` 指定的解释器运行，可保证用对
-依赖环境，同时让主程序保持「只用标准库」。
+依赖（faster-whisper）装在独立 venv 里，而主程序可能由别的解释器启动。
+统一以子进程 + `[tools].python` 指定的解释器运行，可保证用对依赖环境，
+同时让主程序保持「只用标准库」。
 
 用法：
     python -m asr --audio work/x.wav --out work/x.asr.json --backend faster --model medium

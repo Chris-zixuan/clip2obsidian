@@ -15,7 +15,7 @@ from datetime import date
 from pathlib import Path
 
 from core import config as config_mod
-from core import paths, schema
+from core import schema
 from publish import render as R
 
 
@@ -34,23 +34,22 @@ def _cfg(vault: str, *, max_len: int = 60, desc_source: str = "auto") -> config_
 def _clip(
     *,
     title: str = "测试标题",
-    author: str = "不知所",
+    author: str = "某UP主",
     published: str = "2026-09-16",
     description: str = "",
     transcript: str = "",
-    content_type: str = "video",
 ) -> schema.Clip:
     clip = schema.new_clip(
-        platform="douyin",
-        platform_id="7686034803698754161",
-        content_type=content_type,
-        source_url="https://www.douyin.com/video/7686034803698754161",
+        platform="bilibili",
+        platform_id="BV1xx411c7mD",
+        content_type="video",
+        source_url="https://www.bilibili.com/video/BV1xx411c7mD",
     )
     clip.meta.title = title
     clip.meta.author = author
     clip.meta.published = published
     clip.meta.description = description
-    clip.provenance.fetcher = "yt-dlp@2026.09.15"
+    clip.provenance.fetcher = "local-import"
     clip.provenance.extractor = "asr:faster:medium"
     if transcript:
         clip.content.transcript = [schema.Segment(start=0.0, end=2.0, text=transcript)]
@@ -81,7 +80,7 @@ class TestYamlEscape(unittest.TestCase):
 
 
 class TestFrontmatter(unittest.TestCase):
-    """来源层字段必须与既有 importer 剪藏一致（用户拍板 2A）。"""
+    """来源层字段必须与既有 importer 剪藏一致。"""
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
@@ -97,13 +96,13 @@ class TestFrontmatter(unittest.TestCase):
             self.assertIn(key, fm)
 
     def test_clipping_type_matches_platform(self):
-        self.assertIn("clipping_type: douyin-video", self._fm(_clip()))
+        self.assertIn("clipping_type: bilibili-video", self._fm(_clip()))
 
     def test_created_is_today(self):
         self.assertIn(f"created: {date.today().isoformat()}", self._fm(_clip()))
 
     def test_published_is_bare_value(self):
-        """date 类型加引号会被 Obsidian 属性面板改回去（协作约定 §3.5）。"""
+        """date 类型加引号会被 Obsidian 属性面板改回去。"""
         self.assertIn("published: 2026-09-16", self._fm(_clip()))
         self.assertNotIn('published: "2026-09-16"', self._fm(_clip()))
 
@@ -111,10 +110,19 @@ class TestFrontmatter(unittest.TestCase):
         self.assertNotIn("published:", self._fm(_clip(published="")))
 
     def test_author_rendered_as_wikilink(self):
-        self.assertIn('- "[[不知所]]"', self._fm(_clip()))
+        self.assertIn('- "[[某UP主]]"', self._fm(_clip()))
 
-    def test_missing_author_falls_back_to_unknown(self):
-        self.assertIn('- "[[unknown]]"', self._fm(_clip(author="")))
+    def test_missing_author_omitted(self):
+        """作者为空时不写 author 行，绝不写 [[unknown]] 脏值。"""
+        self.assertNotIn("author:", self._fm(_clip(author="")))
+        self.assertNotIn("[[unknown]]", self._fm(_clip(author="")))
+
+    def test_missing_source_omitted(self):
+        """source_url 为空时不写 source 行。"""
+        clip = _clip()
+        clip.source_url = ""
+        clip.canonical_url = ""
+        self.assertNotIn("source:", self._fm(clip))
 
     def test_multiline_description_does_not_break_yaml(self):
         """回归：description 里落进真实换行符会把 frontmatter 撑破。"""
@@ -126,8 +134,7 @@ class TestFrontmatter(unittest.TestCase):
         self.assertTrue(desc_lines[0].endswith('"'))
 
     def test_every_line_is_single_line_yaml(self):
-        clip = _clip(description="带\n换行")
-        fm = self._fm(clip)
+        fm = self._fm(_clip(description="带\n换行"))
         self.assertNotIn("\n\n", fm)          # 没有空行被意外插入
         self.assertTrue(fm.startswith("---\n"))
         self.assertTrue(fm.endswith("\n---"))
@@ -137,7 +144,7 @@ class TestFrontmatter(unittest.TestCase):
         self.assertIn("tags:\n  - 生活\n  - 成长", fm)
 
     def test_tags_not_carry_clippings(self):
-        """§4.4：tags 只用受控词表标签，不写 clippings。"""
+        """tags 只用受控词表标签，不写 clippings。"""
         self.assertNotIn("- clippings", self._fm(_clip(), tags=("生活",)))
 
 
@@ -174,32 +181,22 @@ class TestDescriptionSource(unittest.TestCase):
         self.assertEqual(got, self.LONG_PLATFORM)
         # 核心：不得把 ASR 的同音字错误写进属性面板
         self.assertNotIn("REW圆片", got)
-        self.assertNotIn("五分钟选择", got)
 
     def test_auto_falls_back_to_transcript_when_platform_too_short(self):
         clip = _clip(description="短", transcript=self.TRANSCRIPT)
-        got = R._description_source(clip, "auto")
-        self.assertIn("REW圆片", got)  # 退回转写（含同音字，但总比空着好）
+        self.assertIn("REW圆片", R._description_source(clip, "auto"))
 
     def test_auto_falls_back_when_platform_only_has_hashtags(self):
-        clip = _clip(description="#摄影 #摄影师 #AI选片", transcript=self.TRANSCRIPT)
+        clip = _clip(description="#摄影 #AI选片", transcript=self.TRANSCRIPT)
         self.assertIn("REW圆片", R._description_source(clip, "auto"))
 
     def test_platform_mode_ignores_threshold(self):
         clip = _clip(description="短文案", transcript=self.TRANSCRIPT)
         self.assertEqual(R._description_source(clip, "platform"), "短文案")
 
-    def test_platform_mode_falls_back_when_empty(self):
-        clip = _clip(description="", transcript=self.TRANSCRIPT)
-        self.assertIn("REW圆片", R._description_source(clip, "platform"))
-
     def test_transcript_mode_uses_transcript(self):
         clip = _clip(description=self.LONG_PLATFORM, transcript=self.TRANSCRIPT)
         self.assertIn("REW圆片", R._description_source(clip, "transcript"))
-
-    def test_transcript_mode_falls_back_when_no_transcript(self):
-        clip = _clip(description=self.LONG_PLATFORM)
-        self.assertIn("拍了2000张", R._description_source(clip, "transcript"))
 
     def test_result_is_flattened(self):
         clip = _clip(description="第一行\n第二行，这是一段足够长的平台文案内容")
@@ -207,7 +204,7 @@ class TestDescriptionSource(unittest.TestCase):
 
 
 class TestCleanTitle(unittest.TestCase):
-    """抖音标题会被 yt-dlp 截断，留下 `...` 尾巴（真实样本）。"""
+    """标题常被截断，留下 `...` 尾巴（真实样本）。"""
 
     REAL = (
         "摄影师不用熬夜选片了，5分钟选完 RAW 原片直接筛，连拍自动归进相似组 "
@@ -248,7 +245,7 @@ class TestSanitize(unittest.TestCase):
 
 
 class TestRenderGuards(unittest.TestCase):
-    """入库前的三道闸门。"""
+    """入库前的闸门。"""
 
     def setUp(self):
         self._td = tempfile.TemporaryDirectory()
@@ -261,25 +258,12 @@ class TestRenderGuards(unittest.TestCase):
         self.assertIn("标签", str(ctx.exception))
 
     def test_rejects_invalid_clip(self):
-        bad = _clip(transcript="内容")  # video 但无 transcript → 交给下面构造
+        bad = _clip(transcript="内容")
         bad.content.transcript = []
-        bad.meta.description = ""
+        bad.assets = []
         with self.assertRaises(R.PublishError) as ctx:
             R.render(bad, tags=["生活"], cfg=self.cfg)
         self.assertIn("校验未通过", str(ctx.exception))
-
-    def test_rejects_pending_ocr(self):
-        clip = schema.new_clip(
-            platform="xiaohongshu",
-            platform_id="x1",
-            content_type="image_text",
-            source_url="https://www.xiaohongshu.com/explore/x1",
-        )
-        clip.assets = [schema.Asset(kind="image", path="raw/x/01.jpg", order=1, role="content")]
-        clip.content.images_ocr = [schema.ImageOcr(order=1, text="", status="pending")]
-        with self.assertRaises(R.PublishError) as ctx:
-            R.render(clip, tags=["生活"], cfg=self.cfg)
-        self.assertIn("未回填", str(ctx.exception))
 
 
 class TestRenderOutput(unittest.TestCase):
@@ -348,99 +332,12 @@ class TestRenderOutput(unittest.TestCase):
 
     def test_rerender_backs_up_previous_note(self):
         clip = _clip(transcript="正文内容足够长。")
-        first = R.render(clip, tags=["生活"], title="测试标题", cfg=self.cfg)
+        R.render(clip, tags=["生活"], title="测试标题", cfg=self.cfg)
         second = R.render(clip, tags=["成长"], title="测试标题", cfg=self.cfg)
         self.assertIsNotNone(second.replaced_backup)
         self.assertTrue(second.replaced_backup.exists())
         self.addCleanup(lambda: second.replaced_backup.unlink(missing_ok=True))
         self.assertIn("成长", second.path.read_text(encoding="utf-8"))
-
-
-class TestPlaceAssets(unittest.TestCase):
-
-    def setUp(self):
-        self._td = tempfile.TemporaryDirectory()
-        self.cfg = _cfg(self._td.name)
-        self.addCleanup(self._td.cleanup)
-        self._src_dir = paths.PROJECT_ROOT / "raw" / "_unittest_assets"
-        self._src_dir.mkdir(parents=True, exist_ok=True)
-        self.addCleanup(self._cleanup_src)
-
-    def _cleanup_src(self):
-        import shutil
-
-        shutil.rmtree(self._src_dir, ignore_errors=True)
-
-    def _img_clip(self, orders=(1, 2)) -> schema.Clip:
-        clip = schema.new_clip(
-            platform="xiaohongshu",
-            platform_id="x1",
-            content_type="image_text",
-            source_url="https://www.xiaohongshu.com/explore/x1",
-        )
-        for i in orders:
-            p = self._src_dir / f"{i}.jpg"
-            p.write_bytes(b"\xff\xd8\xff" + bytes([i]) * 16)
-            clip.assets.append(
-                schema.Asset(kind="image", path=f"raw/_unittest_assets/{i}.jpg", order=i, role="content")
-            )
-        clip.content.images_ocr = [
-            schema.ImageOcr(order=i, text=f"图 {i} 的内容", status="done") for i in orders
-        ]
-        return clip
-
-    def test_copies_images_into_attachment_folder(self):
-        clip = self._img_clip()
-        res = R.PublishResult(path=Path("x"), note_name="笔记名")
-        picked = R._place_assets(clip, "笔记名", self.cfg, dry_run=False, result=res)
-        self.assertEqual(len(picked), 2)
-        self.assertEqual(len(res.assets), 2)
-        for f in res.assets:
-            self.assertTrue(f.exists())
-            self.assertEqual(f.parent.name, "笔记名")
-
-    def test_naming_follows_cal_plugin_rule(self):
-        clip = self._img_clip(orders=(1,))
-        res = R.PublishResult(path=Path("x"), note_name="笔记名")
-        picked = R._place_assets(clip, "笔记名", self.cfg, dry_run=False, result=res)
-        fname = picked[0][1]
-        self.assertTrue(fname.startswith("笔记名-"))
-        self.assertTrue(fname.endswith("-1.jpg"))
-
-    def test_order_is_respected(self):
-        clip = self._img_clip(orders=(2, 1))  # 故意乱序
-        res = R.PublishResult(path=Path("x"), note_name="笔记名")
-        picked = R._place_assets(clip, "笔记名", self.cfg, dry_run=False, result=res)
-        self.assertEqual([a.order for a, _ in picked], [1, 2])
-
-    def test_dry_run_creates_no_folder(self):
-        clip = self._img_clip()
-        res = R.PublishResult(path=Path("x"), note_name="笔记名")
-        R._place_assets(clip, "笔记名", self.cfg, dry_run=True, result=res)
-        self.assertFalse((self.cfg.vault.attachments / "笔记名").exists())
-
-    def test_missing_source_produces_warning_not_crash(self):
-        clip = self._img_clip()
-        clip.assets[0].path = "raw/_unittest_assets/不存在.jpg"
-        res = R.PublishResult(path=Path("x"), note_name="笔记名")
-        picked = R._place_assets(clip, "笔记名", self.cfg, dry_run=False, result=res)
-        self.assertEqual(len(picked), 1)  # 坏的那张被跳过
-        self.assertTrue(any("缺失" in w for w in res.warnings))
-
-    def test_cover_not_copied(self):
-        clip = self._img_clip()
-        clip.assets.append(
-            schema.Asset(kind="cover", path="raw/_unittest_assets/1.jpg", order=0, role="cover")
-        )
-        res = R.PublishResult(path=Path("x"), note_name="笔记名")
-        picked = R._place_assets(clip, "笔记名", self.cfg, dry_run=False, result=res)
-        self.assertEqual(len(picked), 2)  # 封面不算正文图
-
-    def test_video_clip_has_no_attachments(self):
-        clip = _clip(transcript="正文")
-        res = R.PublishResult(path=Path("x"), note_name="笔记名")
-        picked = R._place_assets(clip, "笔记名", self.cfg, dry_run=False, result=res)
-        self.assertEqual(picked, [])
 
 
 if __name__ == "__main__":

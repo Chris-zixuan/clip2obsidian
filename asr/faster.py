@@ -1,8 +1,6 @@
 """faster-whisper 引擎：CPU 可跑，不依赖 Apple Silicon。
 
-这是当前默认引擎（迁移自旧项目的 transcribe.py）。
 速度参考：medium + CPU int8，约 1:0.65 实时率（8.5 分钟音频 ≈ 5.5 分钟）。
-若机器是 Apple Silicon，改用 `mlx` 后端会快数倍。
 """
 
 from __future__ import annotations
@@ -30,8 +28,7 @@ class Engine(AsrEngine):
         except ImportError as e:  # pragma: no cover
             raise AsrError(
                 "当前解释器里没有 faster-whisper。\n"
-                "  请确认 config.toml 的 [tools].python 指向装好依赖的解释器，"
-                "或改用 backend = \"mlx\"。"
+                "  请确认 config.toml 的 [tools].python 指向装好依赖的解释器。"
             ) from e
 
         from core.textnorm import to_simplified

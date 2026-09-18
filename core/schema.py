@@ -3,11 +3,12 @@
 设计要点
 --------
 1. 所有平台的 extractor 都产出这个结构，distill 与 publish 只认它。
-   新增平台时只要能填满这份结构，下游三层零改动。
-2. 三种内容形态（video / image_text / article）共用一套字段，
-   下游不必写 if platform == ... 的分支。
-3. `provenance` 记录抓取手段与版本 —— 笔记里那句「未经校对」提示
+   新增平台时只要能填满这份结构，下游零改动。
+2. `provenance` 记录提取手段与已知问题 —— 笔记里那句「未经校对」提示
    由此自动生成，而不是靠人记得写。
+
+本地导入场景下 `source_url` 允许为空（用户只给了本地文件，没有链接）。
+空值在渲染层优雅降级，不产出 `[[unknown]]` 这类脏值。
 """
 
 from __future__ import annotations
@@ -20,12 +21,10 @@ from typing import Any
 
 SCHEMA_VERSION = "1.0"
 
-# 已知平台与内容形态。新增平台时在这里补一个值即可（配合 core/registry.py）。
-KNOWN_PLATFORMS = ("douyin", "xiaohongshu")
-CONTENT_TYPES = ("video", "image_text", "article")
-ASSET_KINDS = ("image", "video", "cover", "audio", "subtitle")
-ASSET_ROLES = ("cover", "content")
-OCR_STATUS = ("pending", "done", "failed")
+# 已知平台与内容形态。新增平台时在 core/registry.py 同步注册。
+KNOWN_PLATFORMS = ("bilibili",)
+CONTENT_TYPES = ("video",)
+ASSET_KINDS = ("video", "cover")
 
 
 def _pick(cls: type, data: Any) -> dict:
@@ -61,24 +60,15 @@ class Meta:
 
 @dataclass
 class Asset:
-    """下载到本地的媒体文件。
+    """本地媒体文件。
 
     `kind` / `path` 给默认空串而非设为必填：这样坏数据能读进来、由
     `validate()` 报成可读问题，而不是在 `from_dict` 阶段抛 TypeError 栈。
     """
 
     kind: str = ""               # 见 ASSET_KINDS
-    path: str = ""               # 相对项目根，如 raw/douyin_123/01.jpg
-    order: int = 0               # 正文中的排列顺序，从 1 开始；封面为 0
-    role: str = "content"        # 见 ASSET_ROLES
-
-
-@dataclass
-class TextBlock:
-    """线性文本块：正文段落、图内文字等。"""
-
-    type: str = "paragraph"      # paragraph | heading | list | quote
-    text: str = ""
+    path: str = ""               # 本地绝对路径
+    order: int = 0
 
 
 @dataclass
@@ -91,33 +81,18 @@ class Segment:
 
 
 @dataclass
-class ImageOcr:
-    """单张图片的内容转写（由 agent 读图后回填）。
-
-    status: pending 表示尚未回填 —— 这时 clip.json 是不完整的，
-    publish 层应当拒绝入库。
-    """
-
-    order: int = 0
-    text: str = ""
-    status: str = "pending"
-
-
-@dataclass
 class Content:
-    """内容主体，三分区。"""
+    """内容主体。"""
 
-    text_blocks: list[TextBlock] = field(default_factory=list)
-    transcript: list[Segment] = field(default_factory=list)   # 仅 video
-    images_ocr: list[ImageOcr] = field(default_factory=list)  # 仅 image_text
+    transcript: list[Segment] = field(default_factory=list)
 
 
 @dataclass
 class Provenance:
-    """来源追踪：谁抓的、怎么提的、有什么已知问题。"""
+    """来源追踪：谁导入的、怎么提的、有什么已知问题。"""
 
-    fetcher: str = ""            # 如 yt-dlp@2026.09.15
-    extractor: str = ""          # 如 subtitle:auto / asr:faster-medium / vision:agent
+    fetcher: str = ""            # 如 local-import
+    extractor: str = ""          # 如 subtitle:local:srt / asr:faster:medium
     warnings: list[str] = field(default_factory=list)
 
 
@@ -157,15 +132,13 @@ class Clip:
         meta_fields = _pick(Meta, meta_d)
         meta_fields.pop("stats", None)
         meta = Meta(**meta_fields, stats=Stats(**_pick(Stats, meta_d.get("stats"))))
-        # 兼容 topics/stats 被写成字符串等脏数据的情况
+        # 兼容 topics 被写成字符串等脏数据的情况
         if not isinstance(meta.topics, list):
             meta.topics = [str(meta.topics)]
 
         content_d = d.get("content") or {}
         content = Content(
-            text_blocks=[TextBlock(**_pick(TextBlock, x)) for x in content_d.get("text_blocks") or []],
             transcript=[Segment(**_pick(Segment, x)) for x in content_d.get("transcript") or []],
-            images_ocr=[ImageOcr(**_pick(ImageOcr, x)) for x in content_d.get("images_ocr") or []],
         )
 
         # 嵌套字段单独构造，先从顶层扁平字段里摘出去，否则会重复传参
@@ -196,37 +169,9 @@ class Clip:
         """原生 id（去掉平台前缀）。"""
         return self.id.split(":", 1)[1] if ":" in self.id else self.id
 
-    @property
-    def content_assets(self) -> list[Asset]:
-        """正文媒体（不含封面）。"""
-        return [a for a in self.assets if a.role == "content"]
-
-    @property
-    def cover(self) -> Asset | None:
-        for a in self.assets:
-            if a.role == "cover" or a.kind == "cover":
-                return a
-        return None
-
-    def full_text(self, *, include_transcript: bool = True) -> str:
+    def full_text(self) -> str:
         """拼出可用于摘要、description、字数统计的纯文本。"""
-        parts: list[str] = [b.text for b in self.content.text_blocks if b.text]
-        if include_transcript:
-            parts.extend(s.text for s in self.content.transcript if s.text)
-        parts.extend(o.text for o in self.content.images_ocr if o.text)
-        return "\n".join(p for p in parts if p).strip()
-
-    def pending_ocr(self) -> list[ImageOcr]:
-        """尚未回填的图片转写项。"""
-        return [o for o in self.content.images_ocr if o.status != "done"]
-
-    def ocr_ready(self) -> bool:
-        """image_text 类型是否已完成图片内容回填。"""
-        if self.content_type != "image_text":
-            return True
-        if not self.content.images_ocr:
-            return False
-        return not self.pending_ocr()
+        return "\n".join(s.text for s in self.content.transcript if s.text).strip()
 
     # ---------------------------------------------------------- 自校验
     def validate(self) -> list[str]:
@@ -252,32 +197,18 @@ class Clip:
             problems.append(
                 f"content_type 非法：{self.content_type!r}，可选 {list(CONTENT_TYPES)}"
             )
-        if not self.source_url:
-            problems.append("source_url 为空")
+        # 注：source_url 允许为空（本地导入场景没有链接）。
+        # 空链接在渲染层优雅降级，不在此处报结构错误。
 
         for a in self.assets:
             if a.kind not in ASSET_KINDS:
                 problems.append(f"asset.kind 非法：{a.kind!r}")
-            if a.role not in ASSET_ROLES:
-                problems.append(f"asset.role 非法：{a.role!r}")
             if not a.path:
                 problems.append("asset.path 为空")
 
-        for o in self.content.images_ocr:
-            if o.status not in OCR_STATUS:
-                problems.append(f"images_ocr.status 非法：{o.status!r}")
-
-        # 内容形态与内容负载的对应关系
         if self.content_type == "video" and not self.content.transcript:
             problems.append("video 类型但 transcript 为空（应至少有一条转写或字幕）")
-        if self.content_type == "image_text":
-            imgs = [a for a in self.content_assets if a.kind == "image"]
-            if imgs and not self.content.images_ocr:
-                problems.append(
-                    f"image_text 有 {len(imgs)} 张正文图但 images_ocr 为空"
-                    "（需 agent 读图回填）"
-                )
-        if not self.full_text() and not self.content_assets:
+        if not self.full_text() and not self.assets:
             problems.append("内容为空：既无文本也无媒体")
 
         return problems

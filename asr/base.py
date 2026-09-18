@@ -73,11 +73,9 @@ class AsrEngine(ABC):
         """把音频文件转成文本。"""
 
 
-# 引擎名 → 模块路径。新增引擎只改这里。
+# 引擎名 → 模块路径。新增引擎：加一个模块并在这里注册，上层零改动。
 _ENGINE_MODULES: dict[str, str] = {
     "faster": "asr.faster",
-    "mlx": "asr.mlx",
-    "none": "asr.none",
 }
 
 

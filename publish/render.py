@@ -2,19 +2,18 @@
 
 职责边界
 --------
-- **代码负责**：文件名清洗、frontmatter 组装、正文结构、附件落位、断链校验。
+- **代码负责**：文件名清洗、frontmatter 组装、正文结构、断链校验。
   这些是机械劳动，代码做才能保证每篇完全一致。
-- **agent 负责**：标题精简（抖音标题常被截断）、知识库标签选择（需语义判断）。
+- **agent 负责**：标题精简、知识库标签选择（需语义判断）。
   通过参数传入，不在本层做判断。
 
-落库口径（2026-09-17 用户拍板，见架构设计 §9 决策 2A / 3A）
-----------------------------------------------------------
-- 落点：`0_Inbox/Clippings/`（协作约定 §3.2）
+落库口径
+--------
+- 落点：`0_Inbox/Clippings/`
 - `类型: clippings`；平台差异用 `clipping_type` 表达，不建平台子目录
 - 来源层字段（`title` / `source` / `author` / `published` / `created` /
-  `clipping_type` / `description`）由本工具写入 —— 视同 importer 产物，
-  字段名与值和既有剪藏保持一致
-- `tags` 只用受控词表标签，**不带** `clippings`（协作约定 §4.4）
+  `clipping_type` / `description`）由本工具写入 —— 视同 importer 产物
+- `tags` 只用受控词表标签，**不带** `clippings`
 """
 
 from __future__ import annotations
@@ -33,10 +32,7 @@ from core.textnorm import hhmmss, mmss, truncate
 # 文件名非法字符
 _ILLEGAL = r'[\\/:*?"<>|#\[\]]'
 # 平台 → clipping_type 值（与库内既有 zhihu-answer 命名风格一致）
-CLIPPING_TYPES = {
-    "douyin": "douyin-video",
-    "xiaohongshu": "xiaohongshu-note",
-}
+CLIPPING_TYPES = {"bilibili": "bilibili-video"}
 
 
 class PublishError(Exception):
@@ -47,7 +43,6 @@ class PublishError(Exception):
 class PublishResult:
     path: Path
     note_name: str
-    assets: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     replaced_backup: Path | None = None
 
@@ -65,7 +60,7 @@ def render(
     """把 Clip 渲染成 vault 笔记。
 
     Args:
-        tags:   知识库受控标签（agent 决定，§4.3 要求至少 1 个）
+        tags:   知识库受控标签（agent 决定，至少 1 个）
         digest: 摘要正文（digest.md 内容，agent 产出）
         title:  标题覆写（agent 精简后的标题），留空则用 clip.meta.title
     """
@@ -76,14 +71,9 @@ def render(
         raise PublishError(
             "clip.json 结构校验未通过，拒绝入库：\n  - " + "\n  - ".join(problems)
         )
-    if not clip.ocr_ready():
-        raise PublishError(
-            "image_text 类型还有图片内容未回填（images_ocr.status = pending）。\n"
-            "  请先让 agent 读图并回填 work/*.clip.json，再入库。"
-        )
     if not tags:
         raise PublishError(
-            "没有指定知识库标签。协作约定 §4.3 要求每篇至少 1 个受控词表标签。\n"
+            "没有指定知识库标签。每篇至少 1 个受控词表标签。\n"
             "  用法：--tags 生活,成长"
         )
 
@@ -93,10 +83,6 @@ def render(
     note_path = outdir / f"{note_name}.md"
 
     result = PublishResult(path=note_path, note_name=note_name)
-
-    # 附件落位（图片类内容才有）
-    body_assets = _place_assets(clip, note_name, cfg, dry_run=dry_run, result=result)
-
     if dry_run:
         return result
 
@@ -105,8 +91,9 @@ def render(
         result.replaced_backup = _backup(note_path)
         result.warnings.append(f"同名笔记已存在，旧版已备份到 {result.replaced_backup}")
 
-    content = _compose(clip, note_title, tags, digest, body_assets, cfg)
-    note_path.write_text(content, encoding="utf-8")
+    note_path.write_text(
+        _compose(clip, note_title, tags, digest, cfg), encoding="utf-8"
+    )
 
     if cfg.publish.verify_after_publish:
         result.warnings.extend(_verify(cfg, note_name))
@@ -119,12 +106,9 @@ def _compose(
     title: str,
     tags: list[str],
     digest: str,
-    body_assets: list[tuple[schema.Asset, str]],
     cfg: config_mod.Config,
 ) -> str:
-    fm = _frontmatter(clip, title, tags, cfg)
-    info = _info_callout(clip)
-    parts = [fm, "", info]
+    parts = [_frontmatter(clip, title, tags, cfg), "", _info_callout(clip)]
 
     if digest.strip():
         parts += ["", digest.strip()]
@@ -133,34 +117,34 @@ def _compose(
     if warn:
         parts += ["", warn]
 
-    if clip.content_type == "video":
-        parts += _body_video(clip)
-    else:
-        parts += _body_rich(clip, body_assets)
-
+    parts += _body_video(clip)
     return "\n".join(parts).rstrip() + "\n"
 
 
 def _frontmatter(clip: schema.Clip, title: str, tags: list[str], cfg: config_mod.Config) -> str:
-    """来源层字段与既有剪藏保持一致（用户拍板 2A）。"""
-    author = clip.meta.author or "unknown"
+    """来源层字段与既有剪藏保持一致。
+
+    source_url / author 允许为空（本地导入常拿不到）。空值**不写对应行**，
+    绝不写 `[[unknown]]` 这类脏值——缺了就是缺了，由用户在 publish 时补。
+    """
+    author = (clip.meta.author or "").strip()
     source = clip.canonical_url or clip.source_url
     clip_type = CLIPPING_TYPES.get(clip.platform, f"{clip.platform}-clip")
-    desc = truncate(
-        _description_source(clip, cfg.publish.description_source), 120
-    )
+    desc = truncate(_description_source(clip, cfg.publish.description_source), 120)
 
     lines = [
         "---",
         "类型: clippings",
         f'title: "{_yaml_escape(title)}"',
-        f'source: "{_yaml_escape(source)}"',
-        "author:",
-        f'  - "[[{_yaml_escape(author)}]]"',
-        f"clipping_type: {clip_type}",
     ]
-    # published / created 用裸值：types.json 已声明为 date，
-    # 加引号会被 Obsidian 属性面板改回裸值（协作约定 §3.5）
+    if source:
+        lines.append(f'source: "{_yaml_escape(source)}"')
+    if author:
+        lines.append("author:")
+        lines.append(f'  - "[[{_yaml_escape(author)}]]"')
+    lines.append(f"clipping_type: {clip_type}")
+    # published / created 用裸值：types.json 已声明为 date，加引号会被
+    # Obsidian 属性面板改回裸值
     if clip.meta.published:
         lines.append(f"published: {clip.meta.published}")
     lines.append(f"created: {date.today().isoformat()}")
@@ -172,18 +156,12 @@ def _frontmatter(clip: schema.Clip, title: str, tags: list[str], cfg: config_mod
 
 
 def _info_callout(clip: schema.Clip) -> str:
-    label = "视频信息" if clip.content_type == "video" else "笔记信息"
-    rows = [f"> [!info] {label}"]
+    rows = ["> [!info] 视频信息"]
     if clip.meta.author:
         rows.append(f"> **作者**：{clip.meta.author}")
-    if clip.content_type == "video":
-        segs = len(clip.content.transcript)
-        dur = hhmmss(clip.meta.duration_sec)
-        rows.append(f"> **时长**：{dur}（{segs} 段）" if segs else f"> **时长**：{dur}")
-    else:
-        imgs = [a for a in clip.content_assets if a.kind == "image"]
-        if imgs:
-            rows.append(f"> **图片**：{len(imgs)} 张")
+    segs = len(clip.content.transcript)
+    dur = hhmmss(clip.meta.duration_sec)
+    rows.append(f"> **时长**：{dur}（{segs} 段）" if segs else f"> **时长**：{dur}")
     if clip.meta.published:
         rows.append(f"> **发布**：{clip.meta.published}")
     s = clip.meta.stats
@@ -196,8 +174,23 @@ def _info_callout(clip: schema.Clip) -> str:
         if s.comment:
             bits.append(f"{s.comment} 评论")
         rows.append(f"> **互动**：{' / '.join(bits)}")
-    rows.append(f"> **链接**：{clip.canonical_url or clip.source_url}")
+    link = clip.canonical_url or clip.source_url
+    if link:
+        rows.append(f"> **链接**：{link}")
+    else:
+        # 本地导入没有链接：用媒体文件名提示来源，不写脏值
+        name = _local_origin_name(clip)
+        rows.append(f"> **来源**：本地文件 {name}" if name else "> **来源**：本地文件")
     return "\n".join(rows)
+
+
+def _local_origin_name(clip: schema.Clip) -> str:
+    """从首个**绝对路径**媒体文件取文件名，用于「本地文件 xxx」提示。"""
+    for a in clip.assets:
+        p = Path(a.path)
+        if p.is_absolute():
+            return p.name
+    return ""
 
 
 def _warning_callout(clip: schema.Clip) -> str:
@@ -226,72 +219,6 @@ def _body_video(clip: schema.Clip) -> list[str]:
     return lines
 
 
-def _body_rich(clip: schema.Clip, assets: list[tuple[schema.Asset, str]]) -> list[str]:
-    """图文类正文：正文文本 + 图内内容转写 + 原图嵌入。"""
-    lines: list[str] = []
-
-    if clip.content.text_blocks:
-        lines += ["", "## 原文", ""]
-        for b in clip.content.text_blocks:
-            lines.append(b.text if b.type == "paragraph" else f"{b.type}: {b.text}")
-            lines.append("")
-
-    ocr_map = {o.order: o for o in clip.content.images_ocr}
-    if ocr_map:
-        lines += ["## 图内内容", ""]
-        for asset, fname in assets:
-            ocr = ocr_map.get(asset.order)
-            caption = ""
-            if ocr and ocr.text.strip():
-                first = ocr.text.strip().splitlines()[0].lstrip("# ").strip()
-                caption = first[:40]
-            lines.append(f"![[{fname}]]")
-            lines.append(f"*图 {asset.order}{'：' + caption if caption else ''}*")
-            lines.append("")
-            if ocr and ocr.text.strip():
-                lines.append(ocr.text.strip())
-                lines.append("")
-
-    return lines
-
-
-# ------------------------------------------------------------------ 附件
-def _place_assets(
-    clip: schema.Clip,
-    note_name: str,
-    cfg: config_mod.Config,
-    *,
-    dry_run: bool,
-    result: PublishResult,
-) -> list[tuple[schema.Asset, str]]:
-    """把正文图片复制到 8_附件/{笔记名}/，返回 [(asset, 附件文件名)]。
-
-    命名遵循 CAL 插件规则：{笔记名}-{YYYYMMDDHHmm}-{序号}.{ext}
-    """
-    images = [a for a in clip.content_assets if a.kind == "image"]
-    if not images:
-        return []
-
-    images.sort(key=lambda a: a.order)
-    stamp = datetime.now().strftime("%Y%m%d%H%M")
-    target_dir = cfg.vault.attachments / note_name
-    if not dry_run:
-        target_dir.mkdir(parents=True, exist_ok=True)
-
-    out: list[tuple[schema.Asset, str]] = []
-    for i, asset in enumerate(images, 1):
-        src = paths.PROJECT_ROOT / asset.path
-        if not src.exists():
-            result.warnings.append(f"附件源文件缺失，已跳过：{asset.path}")
-            continue
-        fname = f"{note_name}-{stamp}-{i}{src.suffix.lower() or '.jpg'}"
-        if not dry_run:
-            shutil.copy2(src, target_dir / fname)
-            result.assets.append(target_dir / fname)
-        out.append((asset, fname))
-    return out
-
-
 # ------------------------------------------------------------------ 校验
 def _verify(cfg: config_mod.Config, note_name: str) -> list[str]:
     """跑 obsidian CLI 查断链。CLI 不可用时只提示，不阻断。"""
@@ -311,12 +238,12 @@ def _verify(cfg: config_mod.Config, note_name: str) -> list[str]:
 
     hits = [ln for ln in (proc.stdout or "").splitlines() if note_name in ln]
     if hits:
-        return ["检测到断链（附件嵌入未解析）：\n  " + "\n  ".join(hits)]
+        return ["检测到断链：\n  " + "\n  ".join(hits)]
     return []
 
 
 # ------------------------------------------------------------------ 工具
-# 平台文案里的噪声：抖音会在末尾附「……版本过低，升级后可展示全部信息」
+# 平台文案里的噪声尾部
 _PLATFORM_JUNK_RE = re.compile(
     r"(?:…{2,}|\.{3,})[^。！？\n]{0,40}(?:版本过低|升级|下载|客户端|复制打开)[^\n]*$"
 )
@@ -336,12 +263,9 @@ def _clean_platform_text(s: str) -> str:
 def _description_source(clip: schema.Clip, mode: str = "auto") -> str:
     """决定 frontmatter `description` 取什么文本。
 
-    语义对齐 importer：importer 写进去的是**来源自身的文案**（如知乎回答的开头、
-    网页的 meta description），不是机器加工过的文本。
-
-    因此默认优先取平台自带文案，而不是 ASR 转写 —— 转写含同音字错误
-    （本次实例里「RAW 原片」被识别成「REW圆片」、「手选」被识别成「首选」），
-    落进属性面板就是脏数据；平台文案是人写的，且天然就是「来源简介」。
+    语义对齐 importer：importer 写进去的是**来源自身的文案**，不是机器加工过的
+    文本。因此默认优先取平台自带文案，而不是 ASR 转写 —— 转写含同音字错误
+    （实例：「RAW 原片」被识别成「REW圆片」），落进属性面板就是脏数据。
     平台文案为空或只剩话题标签时，才退回转写。
 
     mode 取值见 core/config.py::PublishConfig.description_source。
@@ -349,8 +273,7 @@ def _description_source(clip: schema.Clip, mode: str = "auto") -> str:
     from core.textnorm import normalize
 
     def _flat(s: str) -> str:
-        # 折行必须压平，否则换行符会落进 YAML 双引号串里把 frontmatter 撑破；
-        # 同时做标点归一化（clip.json 存的是原始转写，半角标点很难看）
+        # 折行必须压平，否则换行符会落进 YAML 双引号串里把 frontmatter 撑破
         return re.sub(r"\s+", " ", normalize(s or "")).strip()
 
     platform_text = _flat(_clean_platform_text(clip.meta.description))
@@ -370,7 +293,7 @@ def _description_source(clip: schema.Clip, mode: str = "auto") -> str:
 
 
 def _clean_title(title: str) -> str:
-    """去掉抖音标题被 yt-dlp 截断留下的 `...` 尾巴。"""
+    """去掉标题被截断留下的 `...` 尾巴。"""
     title = (title or "").strip()
     title = re.sub(r"[\s。，,]*[^.。，,]{0,20}(\.{3}|…{1,2})$", "", title).strip()
     return title or "untitled"
@@ -389,7 +312,7 @@ def _yaml_escape(s: str) -> str:
 
 def _backup(note_path: Path) -> Path:
     """替换同名笔记前先备份，不做直接删除。"""
-    backup_dir = paths.PROJECT_ROOT / ".workbuddy" / "backups"
+    backup_dir = paths.BACKUP_DIR
     backup_dir.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now().strftime("%Y%m%d%H%M%S")
     dest = backup_dir / f"{note_path.stem}.{stamp}.md"

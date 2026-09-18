@@ -44,31 +44,31 @@ class VaultConfig:
 
 
 @dataclass
-class FetchConfig:
-    """L1 采集层配置。"""
+class IngestConfig:
+    """本地导入层配置（2026-09 改造后取代原 L1 抓取下载）。
 
-    browser: str = "edge"
+    代码不再负责下载视频 / 抓链接，用户把文件放到本地后直接 ingest。
+    这里只管「收件目录」与「可选的元信息探测超时」。
+    """
+
+    # 无参数运行 `clip.py` / `clip.py scan` 时扫描的收件目录。
+    # 支持 ~ 与环境变量；改这里即可换收件口。
+    inbox_dir: str = "~/Downloads/clip2obsidian"
+
+    # 仅用于 `--url` 元信息增强（yt-dlp --dump-single-json --skip-download），
+    # 网络探测失败只记 warning 不阻断，所以超时宽松一点无妨。
     timeout_sec: int = 60
-    video_format: str = "bytevc1_540p_121262-0/best"
-    prefer_subtitle: bool = True
 
     @property
-    def cookie_args(self) -> list[str]:
-        """转成 yt-dlp 的 cookie 参数。
-
-        这是「浏览器可配置」这一扩展点的**唯一出口** —— 其他地方不得
-        直接拼 `--cookies-from-browser`。
-        """
-        name = (self.browser or "").strip().lower()
-        if name in ("", "none", "off", "no"):
-            return []
-        return ["--cookies-from-browser", name]
+    def inbox(self) -> Path:
+        return paths.expand(self.inbox_dir)
 
 
 @dataclass
 class AsrConfig:
     """L2 转写引擎配置。"""
 
+    # 唯一后端：faster-whisper。引擎注册表见 asr/base.py::_ENGINE_MODULES
     backend: str = "faster"
     model: str = "medium"
     language: str = "zh"
@@ -76,17 +76,6 @@ class AsrConfig:
     # 强制离线，只用已缓存的模型。已缓存时能避免联网检查、启动更快；
     # 换新模型（如 medium → large-v3）时须临时设为 false 让它先下载。
     offline: bool = True
-
-
-@dataclass
-class XhsConfig:
-    """小红书专有配置。"""
-
-    mobile_ua: str = (
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) "
-        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 "
-        "Mobile/15E148 Safari/604.1"
-    )
 
 
 @dataclass
@@ -123,9 +112,8 @@ class PublishConfig:
 @dataclass
 class Config:
     vault: VaultConfig = field(default_factory=VaultConfig)
-    fetch: FetchConfig = field(default_factory=FetchConfig)
+    ingest: IngestConfig = field(default_factory=IngestConfig)
     asr: AsrConfig = field(default_factory=AsrConfig)
-    xiaohongshu: XhsConfig = field(default_factory=XhsConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
 
@@ -133,9 +121,8 @@ class Config:
 # ------------------------------------------------------------------ 加载逻辑
 _SECTIONS: dict[str, type] = {
     "vault": VaultConfig,
-    "fetch": FetchConfig,
+    "ingest": IngestConfig,
     "asr": AsrConfig,
-    "xiaohongshu": XhsConfig,
     "tools": ToolsConfig,
     "publish": PublishConfig,
 }
@@ -144,7 +131,7 @@ _SECTIONS: dict[str, type] = {
 _ENV_OVERRIDES: dict[tuple[str, str], str] = {
     ("vault", "path"): "C2O_VAULT_PATH",
     ("vault", "inbox_subdir"): "C2O_INBOX_SUBDIR",
-    ("fetch", "browser"): "C2O_BROWSER",
+    ("ingest", "inbox_dir"): "C2O_INBOX_DIR",
     ("asr", "backend"): "C2O_ASR_BACKEND",
     ("asr", "model"): "C2O_ASR_MODEL",
     ("tools", "ffmpeg"): "C2O_FFMPEG",
@@ -259,8 +246,7 @@ def describe(cfg: Config) -> list[tuple[str, str]]:
         ("知识库根", str(cfg.vault.root)),
         ("剪藏落点", str(cfg.vault.inbox)),
         ("附件目录", str(cfg.vault.attachments)),
-        ("浏览器 cookie 源", cfg.fetch.browser or "(none)"),
-        ("字幕优先", "是" if cfg.fetch.prefer_subtitle else "否"),
+        ("收件目录", str(cfg.ingest.inbox)),
         ("ASR 引擎", f"{cfg.asr.backend} / {cfg.asr.model}"
                      + ("（离线）" if cfg.asr.offline else "")),
         ("ffmpeg", cfg.tools.ffmpeg_bin or "(未找到)"),
