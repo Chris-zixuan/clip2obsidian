@@ -53,7 +53,8 @@ python clip.py publish bilibili:BV1xx411c7mD --tags 生活 --title "精简标题
    全部收敛到 L3 一个点，通过参数传入，不污染其它环节。
 3. **防幻觉**：元信息按 sidecar → `--url` → 文件名 → 留空逐层降级，
    **拿不到就留空**，绝不从外部知识补。空 `source_url` / `author` 在渲染层优雅降级。
-4. **入库闸门**：`validate()` 结构校验 + 必须有受控标签，任一不过即拒绝落库。
+4. **入库三道闸门**：`validate()` 结构校验 + 摘要校验（`core/digest.py`：不许是
+   占位符、不许带 frontmatter、不许整句照抄原文）+ 必须有受控标签，任一不过即拒绝落库。
 5. **只读不删**：覆盖同名笔记前先 `mv` 到 `.workbuddy/backups/`。
 6. **配置零硬编码**：所有路径/参数在 `config.toml`，未知段与未知键直接报错。
 
@@ -105,6 +106,6 @@ python -m pytest --basetemp=/tmp/c2o_pytest
 ## 待办（重建计划）
 
 - [x] 平台 id 改为文件内容指纹，改名 / 移动不再重复落库
-- [ ] L3 缺少机器校验：digest 结构不合规没有检查点
+- [x] 摘要（`digest.md`）纳入机器校验，成为入库前的第三道闸门
 - [ ] 多平台（抖音 / 小红书图文）按上述 SOP 长回来
 - [ ] 图文形态（`image_text`）与附件落位在精简时移除，需重新设计

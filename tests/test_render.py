@@ -31,6 +31,16 @@ def _cfg(vault: str, *, max_len: int = 60, desc_source: str = "auto") -> config_
     return cfg
 
 
+# 合规摘要：有分节、正文够长、不与转写逐字重复
+_GOOD_DIGEST = (
+    "## 要点\n\n"
+    "- 连拍会自动归进相似组，AI 先粗筛，最后留哪张仍由摄影师决定。\n"
+    "- 两千张照片五分钟筛完，省下的是体力活而不是审美判断。\n\n"
+    "## 我的思考\n\n"
+    "- 可以拿来对照自己的选片流程，看看哪一步其实一直在重复劳动。"
+)
+
+
 def _clip(
     *,
     title: str = "测试标题",
@@ -265,6 +275,24 @@ class TestRenderGuards(unittest.TestCase):
             R.render(bad, tags=["生活"], cfg=self.cfg)
         self.assertIn("校验未通过", str(ctx.exception))
 
+    def test_rejects_bad_digest(self):
+        """摘要是 L3 唯一的人工产物，不合格就不许落库。"""
+        clip = _clip(transcript="正文内容足够长。")
+        with self.assertRaises(R.PublishError) as ctx:
+            R.render(clip, tags=["生活"], digest="见原文", cfg=self.cfg)
+        self.assertIn("摘要未通过校验", str(ctx.exception))
+
+    def test_good_digest_passes_without_warnings(self):
+        clip = _clip(transcript="出门拍了2000张照片，用AI五分钟选完，真的不用熬夜手选了。")
+        res = R.render(clip, tags=["生活"], digest=_GOOD_DIGEST, cfg=self.cfg, dry_run=True)
+        self.assertEqual(res.warnings, [])
+
+    def test_no_digest_is_still_allowed(self):
+        """没有摘要时只输出转写全文，不拦（有些收藏只需要全文检索）。"""
+        clip = _clip(transcript="正文内容足够长。")
+        res = R.render(clip, tags=["生活"], cfg=self.cfg, dry_run=True)
+        self.assertEqual(res.warnings, [])
+
 
 class TestRenderOutput(unittest.TestCase):
 
@@ -294,9 +322,7 @@ class TestRenderOutput(unittest.TestCase):
 
     def test_digest_inserted_before_transcript(self):
         clip = _clip(transcript="出门拍了2000张照片，用AI五分钟选完。")
-        res = R.render(
-            clip, tags=["生活"], title="测试标题", digest="## 要点\n\n- 直吃 RAW", cfg=self.cfg
-        )
+        res = R.render(clip, tags=["生活"], title="测试标题", digest=_GOOD_DIGEST, cfg=self.cfg)
         text = res.path.read_text(encoding="utf-8")
         self.assertIn("## 要点", text)
         self.assertLess(text.index("## 要点"), text.index("## 转写全文"))

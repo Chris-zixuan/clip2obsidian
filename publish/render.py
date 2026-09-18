@@ -26,6 +26,7 @@ from datetime import date, datetime
 from pathlib import Path
 
 from core import config as config_mod
+from core import digest as digest_mod
 from core import paths, schema
 from core.textnorm import hhmmss, mmss, truncate
 
@@ -77,12 +78,22 @@ def render(
             "  用法：--tags 生活,成长"
         )
 
+    # 摘要（L3 产物）校验 —— 它是流水线里唯一由 agent 手写的一环，
+    # 不把关的话「见原文」这类占位内容也会顺畅落库。
+    report = digest_mod.check(digest, transcript=clip.full_text()) if digest.strip() else None
+    if report and not report.ok:
+        raise PublishError(
+            "摘要未通过校验，拒绝入库：\n  - " + "\n  - ".join(report.problems)
+        )
+
     note_title = _clean_title(title or clip.meta.title or clip.platform_id)
     note_name = _sanitize(note_title, cfg.publish.filename_max_len)
     outdir = cfg.vault.inbox
     note_path = outdir / f"{note_name}.md"
 
     result = PublishResult(path=note_path, note_name=note_name)
+    if report:
+        result.warnings.extend(report.warnings)
     if dry_run:
         return result
 
