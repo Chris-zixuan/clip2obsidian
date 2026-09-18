@@ -2,8 +2,10 @@
 
 设计原则
 --------
-代码里**不允许**出现硬编码的平台假设（浏览器名、vault 路径、ffmpeg 路径）。
-一律从这里取，这样换机器 / 换浏览器 / 扩展 Windows 时只改配置不碰代码。
+代码里**不允许**出现硬编码的路径与工具假设（ffmpeg 落点、模型名、收件目录）。
+一律从这里取，换机器时只改配置不碰代码。
+
+未知段 / 未知键一律报错 —— 拼错的配置静默失效比直接报错更难查。
 """
 
 from __future__ import annotations
@@ -13,6 +15,7 @@ import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any, get_type_hints
 
 from core import paths
 
@@ -23,41 +26,17 @@ class ConfigError(Exception):
 
 # ------------------------------------------------------------------ 各配置段
 @dataclass
-class VaultConfig:
-    """知识库位置。"""
-
-    path: str = ""
-    inbox_subdir: str = "0_Inbox/Clippings"
-    attachment_subdir: str = "8_附件"
-
-    @property
-    def root(self) -> Path:
-        return paths.expand(self.path)
-
-    @property
-    def inbox(self) -> Path:
-        return self.root / self.inbox_subdir
-
-    @property
-    def attachments(self) -> Path:
-        return self.root / self.attachment_subdir
-
-
-@dataclass
 class IngestConfig:
-    """本地导入层配置（2026-09 改造后取代原 L1 抓取下载）。
+    """L1 素材登记配置。"""
 
-    代码不再负责下载视频 / 抓链接，用户把文件放到本地后直接 ingest。
-    这里只管「收件目录」与「可选的元信息探测超时」。
-    """
-
-    # 无参数运行 `clip.py` / `clip.py scan` 时扫描的收件目录。
-    # 支持 ~ 与环境变量；改这里即可换收件口。
+    # 无参数运行时的收件目录（支持 ~ 与环境变量）
     inbox_dir: str = "~/Downloads/clip2obsidian"
 
-    # 仅用于 `--url` 元信息增强（yt-dlp --dump-single-json --skip-download），
-    # 网络探测失败只记 warning 不阻断，所以超时宽松一点无妨。
+    # `--url` 元信息增强（yt-dlp 只取 JSON、绝不下载）的网络超时
     timeout_sec: int = 60
+
+    # zip 解压后的内容总量上限（MB）。防解压炸弹把磁盘塞满
+    max_unzip_mb: int = 4096
 
     @property
     def inbox(self) -> Path:
@@ -65,76 +44,102 @@ class IngestConfig:
 
 
 @dataclass
-class AsrConfig:
-    """L2 转写引擎配置。"""
+class CloudConfig:
+    """云端转写：OpenAI 兼容端点（multipart 上传本地音频）。
 
-    # 唯一后端：faster-whisper。引擎注册表见 asr/base.py::_ENGINE_MODULES
-    backend: str = "faster"
-    model: str = "medium"
+    可接 OpenAI / 硅基流动 / 小米 MiMo 等。**本次未实测**，
+    配置全空时视为不可用，`provider = auto` 会自动走本地。
+    """
+
+    base_url: str = ""
+    api_key: str = ""
+    model: str = "whisper-1"
+    timeout_sec: int = 300
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.base_url.strip() and self.api_key.strip())
+
+
+@dataclass
+class TranscribeConfig:
+    """转写配置。"""
+
+    # auto —— 本地可用就用本地，否则云端；local / cloud 为强制指定
+    provider: str = "auto"
+
+    # auto —— 依次探测 mlx-whisper、faster-whisper
+    engine: str = "auto"
+
+    # 模型短名。带 "/" 视为完整仓库名直接透传；
+    # 否则按引擎各自映射（mlx → mlx-community/whisper-{model}-mlx）
+    model: str = "large-v3"
+
     language: str = "zh"
     initial_prompt: str = ""
-    # 强制离线，只用已缓存的模型。已缓存时能避免联网检查、启动更快；
-    # 换新模型（如 medium → large-v3）时须临时设为 false 让它先下载。
+
+    # 强制离线，只用已缓存的模型。换新模型时须临时设为 false 先让它下载
     offline: bool = True
+
+    # 分片时长（秒）。分片是为了拿到确定进度、限制内存、单片刻重试
+    chunk_sec: int = 600
+
+    cloud: CloudConfig = field(default_factory=CloudConfig)
 
 
 @dataclass
 class ToolsConfig:
-    """外部工具路径。"""
+    """外部工具路径。留空则自动探测。"""
 
     ffmpeg: str = ""
-    python: str = ""
+    ffprobe: str = ""
 
     @property
     def ffmpeg_bin(self) -> str:
         return paths.find_ffmpeg(self.ffmpeg)
 
     @property
-    def python_bin(self) -> str:
-        return paths.find_python(self.python)
+    def ffprobe_bin(self) -> str:
+        return paths.find_ffprobe(self.ffprobe)
 
 
 @dataclass
-class PublishConfig:
-    """L4 入库层配置。"""
+class ProgressConfig:
+    """进度展示方式。"""
 
-    filename_max_len: int = 60
-    verify_after_publish: bool = True
-
-    # frontmatter `description` 的取值口径：
-    #   auto       —— 平台自带文案够长就用它，否则退回转写（默认）
-    #   platform   —— 只用平台自带文案
-    #   transcript —— 只用转写 / 读图文本
-    # 默认 auto 的理由见 publish/render.py::_description_source
-    description_source: str = "auto"
+    # inline —— 终端就地刷新；window —— 另开终端窗口；off —— 不打进度
+    mode: str = "inline"
 
 
 @dataclass
 class Config:
-    vault: VaultConfig = field(default_factory=VaultConfig)
     ingest: IngestConfig = field(default_factory=IngestConfig)
-    asr: AsrConfig = field(default_factory=AsrConfig)
+    transcribe: TranscribeConfig = field(default_factory=TranscribeConfig)
     tools: ToolsConfig = field(default_factory=ToolsConfig)
-    publish: PublishConfig = field(default_factory=PublishConfig)
+    progress: ProgressConfig = field(default_factory=ProgressConfig)
 
 
 # ------------------------------------------------------------------ 加载逻辑
 _SECTIONS: dict[str, type] = {
-    "vault": VaultConfig,
     "ingest": IngestConfig,
-    "asr": AsrConfig,
+    "transcribe": TranscribeConfig,
     "tools": ToolsConfig,
-    "publish": PublishConfig,
+    "progress": ProgressConfig,
 }
 
-# 环境变量覆盖项：{段, 字段} -> 环境变量名。便于临时调试与跨机运行。
-_ENV_OVERRIDES: dict[tuple[str, str], str] = {
-    ("vault", "path"): "C2O_VAULT_PATH",
-    ("vault", "inbox_subdir"): "C2O_INBOX_SUBDIR",
+# 环境变量覆盖项：字段路径 -> 环境变量名。便于跨机运行与临时调试。
+# 路径用元组表示以支持嵌套段（transcribe.cloud.api_key）。
+_ENV_OVERRIDES: dict[tuple[str, ...], str] = {
     ("ingest", "inbox_dir"): "C2O_INBOX_DIR",
-    ("asr", "backend"): "C2O_ASR_BACKEND",
-    ("asr", "model"): "C2O_ASR_MODEL",
+    ("transcribe", "provider"): "C2O_TRANSCRIBE_PROVIDER",
+    ("transcribe", "engine"): "C2O_TRANSCRIBE_ENGINE",
+    ("transcribe", "model"): "C2O_TRANSCRIBE_MODEL",
+    ("transcribe", "cloud", "base_url"): "C2O_CLOUD_BASE_URL",
+    ("transcribe", "cloud", "api_key"): "C2O_CLOUD_API_KEY",
+    ("transcribe", "cloud", "model"): "C2O_CLOUD_MODEL",
     ("tools", "ffmpeg"): "C2O_FFMPEG",
+    ("tools", "ffprobe"): "C2O_FFPROBE",
+    ("progress", "mode"): "C2O_PROGRESS_MODE",
 }
 
 _cache: Config | None = None
@@ -144,8 +149,8 @@ def load(config_path: Path | None = None, *, required: bool = True) -> Config:
     """读取配置。
 
     Args:
-        config_path: 显式指定配置文件；默认用项目根的 config.toml。
-        required:    True 时缺少配置文件直接报错；False 时返回默认值（供 doctor 自检用）。
+        config_path: 显式指定配置文件；默认用项目根的 config.toml
+        required:    True 时缺少配置文件直接报错；False 时返回默认值（供自检用）
     """
     cfg_path = config_path or paths.CONFIG_PATH
     raw: dict = {}
@@ -176,7 +181,7 @@ def get(*, reload: bool = False) -> Config:
 
 
 def _build(raw: dict) -> Config:
-    """按段构造 Config，未知键直接报错（防拼写错误静默失效）。"""
+    """按段构造 Config，未知段直接报错。"""
     unknown_sections = set(raw) - set(_SECTIONS)
     if unknown_sections:
         raise ConfigError(
@@ -194,6 +199,8 @@ def _build(raw: dict) -> Config:
 
 
 def _build_section(section_name: str, cls: type, data: dict):
+    """构造一个配置段。未知键直接报错，嵌套 dataclass 递归处理。"""
+    hints = get_type_hints(cls)
     known = {f.name for f in dataclasses.fields(cls)}
     unknown = set(data) - known
     if unknown:
@@ -202,53 +209,66 @@ def _build_section(section_name: str, cls: type, data: dict):
             f"  可用项：{sorted(known)}"
         )
 
-    values = {}
+    values: dict[str, Any] = {}
     for f in dataclasses.fields(cls):
         if f.name not in data:
             continue
-        values[f.name] = _coerce(section_name, f, data[f.name])
+        want = hints.get(f.name)
+        value = data[f.name]
+        if dataclasses.is_dataclass(want):
+            if not isinstance(value, dict):
+                raise ConfigError(f"[{section_name}.{f.name}] 必须是一个配置段")
+            values[f.name] = _build_section(f"{section_name}.{f.name}", want, value)
+        else:
+            values[f.name] = _coerce(section_name, f.name, want, value)
     return cls(**values)
 
 
-def _coerce(section: str, f: dataclasses.Field, value):
+def _coerce(section: str, name: str, want: Any, value: Any) -> Any:
     """按 dataclass 声明的类型做基本校验，把明显写错的配置挡在前面。"""
-    want = f.type
-    if want is int or want == "int":
+    if want is int:
+        # bool 是 int 的子类，单独挡掉 `chunk_sec = true` 这类写法
         if isinstance(value, bool) or not isinstance(value, int):
-            raise ConfigError(f"[{section}].{f.name} 应为整数，实际是 {value!r}")
-    elif want is bool or want == "bool":
+            raise ConfigError(f"[{section}].{name} 应为整数，实际是 {value!r}")
+    elif want is bool:
         if not isinstance(value, bool):
-            raise ConfigError(f"[{section}].{f.name} 应为布尔值（true/false），实际是 {value!r}")
-    elif want is str or want == "str":
+            raise ConfigError(
+                f"[{section}].{name} 应为布尔值（true/false），实际是 {value!r}"
+            )
+    elif want is str:
         if not isinstance(value, str):
-            raise ConfigError(f"[{section}].{f.name} 应为字符串，实际是 {value!r}")
+            raise ConfigError(f"[{section}].{name} 应为字符串，实际是 {value!r}")
     return value
 
 
 def _apply_env(cfg: Config) -> None:
-    """环境变量覆盖，便于跨机运行与临时调试。"""
-    for (section, fieldname), env_name in _ENV_OVERRIDES.items():
+    """环境变量覆盖，便于跨机运行与临时调试。支持嵌套字段路径。"""
+    for path, env_name in _ENV_OVERRIDES.items():
         value = os.environ.get(env_name)
         if not value:
             continue
-        section_obj = getattr(cfg, section)
-        current = getattr(section_obj, fieldname)
+        obj: Any = cfg
+        for key in path[:-1]:
+            obj = getattr(obj, key)
+        current = getattr(obj, path[-1])
         if isinstance(current, bool):
             value = value.strip().lower() in ("1", "true", "yes", "on")
         elif isinstance(current, int):
             value = int(value)
-        setattr(section_obj, fieldname, value)
+        setattr(obj, path[-1], value)
 
 
 def describe(cfg: Config) -> list[tuple[str, str]]:
-    """把生效配置整理成 (项, 值) 列表，供 doctor 展示。"""
+    """把生效配置整理成 (项, 值) 列表，供自检命令展示。"""
+    t = cfg.transcribe
+    cloud = "已配置" if t.cloud.configured else "未配置（仅本地）"
     return [
-        ("知识库根", str(cfg.vault.root)),
-        ("剪藏落点", str(cfg.vault.inbox)),
-        ("附件目录", str(cfg.vault.attachments)),
         ("收件目录", str(cfg.ingest.inbox)),
-        ("ASR 引擎", f"{cfg.asr.backend} / {cfg.asr.model}"
-                     + ("（离线）" if cfg.asr.offline else "")),
+        ("转写 provider", t.provider),
+        ("转写引擎", f"{t.engine} / {t.model}" + ("（离线）" if t.offline else "")),
+        ("分片时长", f"{t.chunk_sec} 秒"),
+        ("云端插槽", cloud),
         ("ffmpeg", cfg.tools.ffmpeg_bin or "(未找到)"),
-        ("Python", cfg.tools.python_bin),
+        ("ffprobe", cfg.tools.ffprobe_bin or "(未找到)"),
+        ("进度展示", cfg.progress.mode),
     ]

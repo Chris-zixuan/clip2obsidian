@@ -1,97 +1,147 @@
-# clip2obsidian · 本地文件 → Obsidian 笔记
+# clip2obsidian · 本地素材 → 待入库的 md
 
-把**已经下载到本地**的视频，蒸馏成符合私人知识库规范的 Obsidian 笔记。
+把**已经下载到本地**的素材（视频 / 音频 / 图文）转成一份干净 md，再交给 agent 落进
+Obsidian 知识库。
 
-前 90%（抽音频、转写、模板渲染、附件落位、断链校验）用现成工具；
-最后 10%（落成符合自己知识库规范的笔记）自己写 —— 这 10% 才是项目存在的理由。
+前 90%（抽音轨、转写、模板渲染、断链校验）用现成工具；最后 10%（落成符合自己知识库
+规范的笔记）自己写 —— 那 10% 才是这套东西存在的理由。
 
-## 四层流水线
+## 三层
 
-| 层 | 做什么 | 产物 | 谁做 |
+| 层 | 做什么 | 谁做 | 产物 |
 |---|---|---|---|
-| **L1** ingest | 本地文件 → 精简物料清单 | `raw/{id}/source.json` | 代码 |
-| **L2** extract | 物料 → 统一契约 | `work/{id}.clip.json` | 代码 |
-| **L3** distill | 读契约、写摘要 | `work/{id}.digest.md` | **agent** |
-| **L4** publish | 契约 + 摘要 → 笔记 | `vault/0_Inbox/Clippings/{标题}.md` | 代码渲染 + agent 定标签/标题 |
+| **L1** route | 类型判定、内容指纹、元信息降级 | 代码 | `raw/{id}/job.json` |
+| **L2** convert | 视频/音频转写、图文骨架、md 组装 | 代码 | `work/{id}.md`（纯正文 + 来源块） |
+| **L3** ingest | 组属性、落 `0_Inbox/Clippings/`、断链复核 | agent + `skills/clip-to-obsidian` | 知识库笔记 |
 
-每层产物落盘、可单独检查、可单独重跑。`clip.json`（`core/schema.py`）是四层之间
-**唯一的通信契约**：平台 extractor 只负责填满它，下游完全不认识平台。
+**本项目代码只读写 `raw/` 与 `work/`，不出现任何知识库路径。** 这条边界是物理保证的，
+不是口头约定 —— 入库完全由 skill 与 agent 完成。
 
-**代码不抓链接、不下载**：用户把文件下到本地后直接 `ingest`。
-大视频不复制进 `raw/`，只记绝对路径。
+## 支持什么
+
+| 输入 | 处理 |
+|---|---|
+| 视频（`.mp4` `.mov` `.mkv` …） | ffmpeg 抽音轨 → **本地字幕优先**（命中则不转写）→ 分片转写 |
+| 音频（`.mp3` `.wav` `.m4a` …） | 直接转写 |
+| 图文（图片目录 / zip） | 图片按自然序复制到 `work/{id}/images/`，产出骨架 md |
+| 目录 | 含视频/音频/zip → 批量逐项；只含图片 → 当作一条图文 |
+| zip | 安全解压（防目录穿越与解压炸弹）后重新判定 |
+
+素材被改名、移动、重新打包，都还是**同一条** —— id 取文件内容指纹，不取文件名。
 
 ## 快速开始
 
 ```bash
-# 1) 环境（用你有依赖的那个解释器）
-pip install faster-whisper zhconv yt-dlp       # yt-dlp 可选
-brew install ffmpeg
+# 1) 依赖（用你装依赖的那个解释器；项目根 .venv 已软链到它）
+pip install mlx-whisper      # Apple Silicon，快（实测 884 秒音频约 230 秒）
+# 或 pip install faster-whisper   # CPU 也能跑，慢一倍多
+pip install zhconv           # 繁转简（可选，缺了会自动跳过）
+brew install ffmpeg          # 需要 ffmpeg 与 ffprobe
 
 # 2) 配置
-cp config.example.toml config.toml             # 改 vault.path / tools.python
+cp config.example.toml config.toml
 
 # 3) 自检
 python clip.py doctor
 
 # 4) 跑
-python clip.py "~/Downloads/xxx_哔哩哔哩_bilibili.mp4"   # = ingest + extract
-python clip.py scan                                      # 看收件目录里有什么
+python clip.py ~/Downloads/xxx_哔哩哔哩_bilibili.mp4   # 一步跑完 L1+L2
+python clip.py scan                                     # 看收件目录里有什么
+python clip.py status                                   # 看处理到哪一步
 ```
 
-之后由 agent 完成 L3 写摘要，再：
+之后由 agent 读 `work/{id}.md`，用 `skills/clip-to-obsidian` 入库。
+
+## 转写：本地优先，云端留插槽
+
+```toml
+[transcribe]
+provider = "auto"     # auto：本地可用就用本地，否则云端
+engine   = "auto"     # auto：依次探测 mlx-whisper、faster-whisper
+model    = "large-v3" # 短名会按引擎映射（mlx → mlx-community/whisper-large-v3-mlx）
+chunk_sec = 600       # 分片时长：确定进度、限制内存、单片刻重试
+```
+
+- **本地**（默认）：免费、离线、时间戳完整、无时长限制
+- **云端**（插槽）：`[transcribe.cloud]` 填 `base_url` / `api_key` / `model` 即启用，
+  走 OpenAI 兼容的 `/audio/transcriptions`，直接 multipart 上传本地音频，
+  **不需要对象存储中转**。本次未实测，配置齐了才会被选中
+
+分片的理由：`mlx-whisper` 是滑窗跑完一次性返回，没有细粒度回调；切片后每片完成
+就是一格确定进度，顺带拿到「长音频不吃满内存」与「单片可重试」。片间重叠 1 秒，
+落在重叠区的片段丢弃，避免边界处截断词句。
+
+## 进度可见
 
 ```bash
-python clip.py publish bilibili:BV1xx411c7mD --tags 生活 --title "精简标题" \
-    --digest work/bilibili_BV1xx411c7mD.digest.md
+python clip.py <路径> --progress inline   # 默认：终端单行原地刷新
+python clip.py <路径> --progress window   # 另开一个终端窗口显示进度条（macOS）
+python clip.py <路径> --progress off      # 不打进度
 ```
 
-## 核心设计
+- 抽音轨：ffmpeg `-progress` + ffprobe 总时长 → **确定百分比**
+- 转写：按片上报（第 i/N 片）→ 确定进度
+- 重定向到文件（非终端）时自动降级为里程碑行，不会写一堆回车符进日志
 
-1. **契约唯一**：新增平台只改 `core/registry.py` + 新建 `pipelines/{平台}/extract.py`。
-   若必须改 `publish/` 或 `schema.py`，说明抽象失败。
-2. **职责边界**：代码只做可重跑的机械劳动；需要判断的事（摘要、标题精简、标签）
-   全部收敛到 L3 一个点，通过参数传入，不污染其它环节。
-3. **防幻觉**：元信息按 sidecar → `--url` → 文件名 → 留空逐层降级，
-   **拿不到就留空**，绝不从外部知识补。空 `source_url` / `author` 在渲染层优雅降级。
-4. **入库三道闸门**：`validate()` 结构校验 + 摘要校验（`core/digest.py`：不许是
-   占位符、不许带 frontmatter、不许整句照抄原文）+ 必须有受控标签，任一不过即拒绝落库。
-5. **只读不删**：覆盖同名笔记前先 `mv` 到 `.workbuddy/backups/`。
-6. **配置零硬编码**：所有路径/参数在 `config.toml`，未知段与未知键直接报错。
+## 转写结果的去向
 
-`description` 默认取平台自带文案而非 ASR 转写 —— 同音字错误会直接进属性面板
-（实测「RAW 原片」→「REW圆片」）。口径由 `[publish].description_source` 控制。
+```
+raw/{id}/job.json          登记备忘（不是跨层契约）
+work/{id}.wav              统一规格音轨（16k 单声道 PCM），可复用
+work/{id}.asr.json         转写结果缓存，重跑不重复计费
+work/{id}.chunks/          分片（命中缓存后不再使用）
+work/{id}.md               ★ 交付物：纯正文 + 来源块
+work/{id}/images/          图文素材的图片副本
+```
 
-7. **clip id 取自文件内容指纹**（大小 + 头尾各 1 MB），不依赖文件名与路径：
-   改名、移动目录都还是同一条，不会重复落库。BV 号单独存 `native_id`，
-   只用于拼链接与展示 —— 拿它当 id 的话，用户一删文件名里的 BV 后缀，
-   同一个视频就又变成新条目了。
+`work/{id}.md` 顶部是一段 HTML 注释形式的来源块（渲染不可见、agent 可解析）：
+
+```
+<!--c2o:meta
+title: 认识 MAF
+source_url: https://www.bilibili.com/video/BV1xx411c7mD
+author: 某UP主
+published: 2026-09-01
+clipping_type: bilibili-video
+-->
+```
+
+**正文里没有 frontmatter** —— 属性由入库 skill 组装，本项目不碰知识库格式。
+
+## 边界
+
+1. **不写知识库**：附件也不搬（知识库规则：搬运/改名附件交给 CAL 插件，AI 不写脚本
+   批量搬）。图片只复制到 `work/{id}/images/`。
+2. **不编造元信息**：sidecar → `--url`（yt-dlp 只取 JSON、绝不下载）→ 文件名 → 留空。
+   拿不到就留空，空值在渲染层优雅降级，不产出 `unknown` 这类脏值。
+3. **只读不删**：本项目不删除任何用户素材，`raw/` 与 `work/` 都是可随时清的缓存。
+4. **文档类型只在 `core/route.py` 注册**：新增平台加一条 `PlatformSpec`
+   （名字特征 + 原生 id 正则 + 链接模板），转换流程完全不认识平台。
 
 ## 目录结构
 
 ```
-clip.py                    # 唯一 CLI 入口
+clip.py                    唯一 CLI 入口（route / convert / run / status / scan / doctor）
 core/
-  schema.py                # clip.json 契约（validate / 序列化）
-  registry.py              # 平台路由（本地文件 → 平台）
-  config.py                # 配置加载与严格校验
-  paths.py                 # 路径集中（平台差异只在这里）
-  textnorm.py              # 文本清洗、时间格式化
-pipelines/
-  common.py                # 视频类共享：字幕解析 → ASR、元信息映射
-  local/ingest.py          # L1 本地导入 → source.json
-  bilibili/extract.py      # L2 B站
-publish/render.py          # L4 渲染与落库
-asr/                       # 转写引擎（可插拔，见 asr/base.py 注册表）
-tests/                     # 契约与渲染回归
-skills/clip-to-obsidian/   # agent 编排说明
+  config.py                配置加载与严格校验（未知段/键直接报错）
+  paths.py                 路径与平台假设集中处
+  route.py                 类型判定、目录二义性消解、平台与元信息降级
+  fingerprint.py           内容指纹（单文件 / 图集）
+  progress.py              进度上报（inline / json / window / null）
+  textnorm.py              繁转简、标点归一、碎句合段、时间格式化
+l1/
+  ingest.py                素材登记 → raw/{id}/job.json
+  ziputil.py               安全解压（防目录穿越与解压炸弹）
+l2/
+  convert.py               按类型分派
+  video.py / audio.py / images.py   三条分支
+  media.py                 ffprobe 取时长、ffmpeg 抽音轨（带进度）
+  subtitle.py              本地字幕解析（srt / vtt / ass）
+  md.py                    来源块 + 正文组装
+  transcribe/              provider：local（mlx/faster）与 cloud（OpenAI 兼容）
+skills/clip-to-obsidian/   L3 入库 skill（配套本项目的 agent 编排说明）
+tests/                     141 项离线回归
 ```
-
-## 新增平台
-
-1. `core/registry.py` 的 `PLATFORMS` 加一条 `PlatformSpec`（含文件名特征与 id 正则）
-2. 新建 `pipelines/{平台}/extract.py`，实现 `extract(source_path, *, cfg, force) -> Clip`
-
-L1 由 `pipelines/local/ingest.py` 统一完成，无需每平台各写一套。
 
 ## 测试
 
@@ -99,13 +149,12 @@ L1 由 `pipelines/local/ingest.py` 统一完成，无需每平台各写一套。
 python -m pytest --basetemp=/tmp/c2o_pytest
 ```
 
-`tests/conftest.py` 会把 `raw/` / `work/` / 备份区整体重定向到临时目录 ——
-否则用例的清理逻辑可能删掉使用者的真实产物（真实踩过）。
-受管控沙盒里需显式给可写 basetemp，否则报 `EEXIST: pytest-of-unknown`。
+`tests/conftest.py` 把 `raw/` / `work/` 重定向到临时目录 —— 否则用例清理逻辑可能删掉
+使用者的真实产物（真实踩过）。受管控环境需显式给可写 basetemp。
 
-## 待办（重建计划）
+## 待办
 
-- [x] 平台 id 改为文件内容指纹，改名 / 移动不再重复落库
-- [x] 摘要（`digest.md`）纳入机器校验，成为入库前的第三道闸门
-- [ ] 多平台（抖音 / 小红书图文）按上述 SOP 长回来
-- [ ] 图文形态（`image_text`）与附件落位在精简时移除，需重新设计
+- [ ] 云端 provider 接入实测（当前仅插槽，未验证）
+- [ ] 分片边界的截断：目前靠 1 秒重叠兜底，可加静音点切分
+- [ ] 抖音 / 小红书图文的元信息与命名细节（识别规则已在 `core/route.py`）
+- [ ] 更细的转写进度（片内叠加静音切分）
